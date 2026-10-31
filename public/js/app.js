@@ -135,6 +135,10 @@ function auth(mode, msg = "") {
       ["email", "Email", "email"],
       ["pw", "Password", "password"],
     ],
+    verify: [
+      ["email", "Email", "email"],
+      ["tok", "Verification code", "text"],
+    ],
     forgot: [["email", "Registered email", "email"]],
     reset: [
       ["email", "Email", "email"],
@@ -145,6 +149,7 @@ function auth(mode, msg = "") {
   const T = {
     login: "Log in",
     register: "Create your account",
+    verify: "Verify your email",
     forgot: "Forgot password",
     reset: "Set a new password",
   };
@@ -161,23 +166,28 @@ function auth(mode, msg = "") {
         });
         await enter(user);
       } else if (mode == "register") {
-        const { user } = await api("/register", {
+        await api("/register", {
           method: "POST",
           body: JSON.stringify({ name: d.name, email: d.email, pw: d.pw }),
         });
+        auth(
+          "verify",
+          '<p class="mu">We sent a verification code to your email. It expires in 10 minutes.</p>',
+        );
+      } else if (mode == "verify") {
+        const { user } = await api("/verify-registration", {
+          method: "POST",
+          body: JSON.stringify({ email: d.email, tok: d.tok }),
+        });
         await enter(user);
       } else if (mode == "forgot") {
-        const { devCode } = await api("/forgot", {
+        const result = await api("/forgot", {
           method: "POST",
           body: JSON.stringify({ email: d.email }),
         });
-        const preview = devCode
-          ? `<div class="pv">Demo mailbox: your reset code is <b>${esc(devCode)}</b> (valid for 1 hour).</div>`
-          : "";
         auth(
           "reset",
-          '<p class="mu">If that email is registered, a reset message is on its way.</p>' +
-            preview,
+          `<p class="mu">${esc(result.message || "If that email is registered, a verification code has been sent.")}</p>`,
         );
       } else if (mode == "reset") {
         await api("/reset", {

@@ -7,6 +7,15 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,name TEXT NOT NULL,email TEXT NOT NULL UNIQUE,salt TEXT NOT NULL,hash TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN('admin','staff','customer')),cid TEXT);
 CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,uid TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,exp INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS resets(email TEXT PRIMARY KEY,tok TEXT NOT NULL,exp INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_otps(
+ email TEXT NOT NULL,
+ purpose TEXT NOT NULL CHECK(purpose IN('register','reset')),
+ code_hash TEXT NOT NULL,
+ payload TEXT,
+ exp INTEGER NOT NULL,
+ attempts INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(email,purpose)
+);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY,v INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS logs(id INTEGER PRIMARY KEY AUTOINCREMENT,t TEXT NOT NULL,msg TEXT NOT NULL);
 ${COLL.map(c=>`CREATE TABLE IF NOT EXISTS ${c}(id TEXT PRIMARY KEY,data TEXT NOT NULL CHECK(json_valid(data)));`).join('\n')}
@@ -60,5 +69,7 @@ const hashPw=(p,salt)=>crypto.scryptSync(p,salt,32).toString('hex');
 const pwOk=p=>typeof p=='string'&&p.length>=9&&/[A-Z]/.test(p)&&/[a-z]/.test(p)&&/[^A-Za-z0-9]/.test(p);
 function makeUser(name,email,pw,role,cid,id){const salt=uid(),u={id:id||uid(),name,email:email.toLowerCase().trim(),salt,hash:hashPw(pw,salt),role,cid:cid||null};
  db.prepare('INSERT INTO users(id,name,email,salt,hash,role,cid) VALUES(@id,@name,@email,@salt,@hash,@role,@cid)').run(u);return u}
+function makeUserFromHash(name,email,salt,hash,role,cid,id){const u={id:id||uid(),name,email:email.toLowerCase().trim(),salt,hash,role,cid:cid||null};
+ db.prepare('INSERT INTO users(id,name,email,salt,hash,role,cid) VALUES(@id,@name,@email,@salt,@hash,@role,@cid)').run(u);return u}
 function log(msg){try{db.prepare('INSERT INTO logs(t,msg) VALUES(?,?)').run(new Date().toISOString(),String(msg).slice(0,500));db.prepare('DELETE FROM logs WHERE id<=(SELECT MAX(id)-200 FROM logs)').run()}catch(e){}console.error(msg)}
-module.exports={db,COLL,uid,tx,get,put,all,subEvents,addSubEvent,seq,paidOf,hashPw,pwOk,makeUser,log};
+module.exports={db,COLL,uid,tx,get,put,all,subEvents,addSubEvent,seq,paidOf,hashPw,pwOk,makeUser,makeUserFromHash,log};

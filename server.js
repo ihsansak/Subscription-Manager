@@ -1,11 +1,12 @@
+require('dotenv').config();
 const express=require('express'),path=require('path'),fs=require('fs'),crypto=require('crypto');
-const D=require('./db'),BL=require('./shared/pricing'),{runBilling}=require('./billing');
+const D=require('./db'),BL=require('./shared/pricing'),{runBilling}=require('./billing'),{sendOtp}=require('./mailer');
 require('./seed')();
 const PROD=process.env.NODE_ENV==='production',PORT=+process.env.PORT||3000,DAY=864e5;
 const today=()=>new Date().toISOString().slice(0,10);
 class HE extends Error{constructor(s,m){super(m);this.s=s}}
 const bad=m=>new HE(400,m),nf=m=>new HE(404,m||'Not found.');
-const wrap=f=>(q,s,n)=>{try{const r=f(q,s);if(r!==undefined)s.json(r)}catch(e){n(e)}};
+const wrap=f=>(q,s,n)=>Promise.resolve().then(()=>f(q,s)).then(r=>{if(r!==undefined)s.json(r)}).catch(n);
 const sha=t=>crypto.createHash('sha256').update(String(t)).digest('hex');
 const eq=(a,b)=>{a=Buffer.from(String(a));b=Buffer.from(String(b));return a.length==b.length&&crypto.timingSafeEqual(a,b)};
 const str=(v,n=200)=>String(v??'').trim().slice(0,n);
@@ -22,20 +23,40 @@ const need=(...r)=>(q,s,n)=>r.includes(q.user.role)?n():n(new HE(403,'You do not
 const STAFF=need('admin','staff'),pub=u=>({id:u.id,name:u.name,email:u.email,role:u.role,cid:u.cid});
 const tries=new Map();
 function limit(q){const now=Date.now(),t=(tries.get(q.ip)||[]).filter(x=>now-x<9e5);if(t.length>=10)throw new HE(429,'Too many attempts. Try again in a few minutes.');t.push(now);tries.set(q.ip,t)}
+const OTP_TTL=10*60e3,OTP_MAX_ATTEMPTS=5;
+const otpCode=()=>String(crypto.randomInt(0,1000000)).padStart(6,'0');
+async function issueOtp(email,purpose,payload=null){
+ const code=otpCode();
+ D.db.prepare('INSERT INTO auth_otps(email,purpose,code_hash,payload,exp,attempts) VALUES(?,?,?,?,?,0) ON CONFLICT(email,purpose) DO UPDATE SET code_hash=excluded.code_hash,payload=excluded.payload,exp=excluded.exp,attempts=0').run(email,purpose,sha(code),payload?JSON.stringify(payload):null,Date.now()+OTP_TTL);
+ try{await sendOtp(email,code,purpose)}catch(e){D.db.prepare('DELETE FROM auth_otps WHERE email=? AND purpose=?').run(email,purpose);D.log(`OTP email failed for ${purpose}: ${e.message}`);throw new HE(503,'We could not send the verification email. Please try again later.')}
+}
+function consumeOtp(email,purpose,code){
+ const r=D.db.prepare('SELECT * FROM auth_otps WHERE email=? AND purpose=?').get(email,purpose);
+ if(!r||r.exp<Date.now()){if(r)D.db.prepare('DELETE FROM auth_otps WHERE email=? AND purpose=?').run(email,purpose);throw bad('That code is invalid or has expired.')}
+ if(r.attempts>=OTP_MAX_ATTEMPTS)throw bad('Too many incorrect attempts. Request a new code.');
+ D.db.prepare('UPDATE auth_otps SET attempts=attempts+1 WHERE email=? AND purpose=?').run(email,purpose);
+ if(!eq(r.code_hash,sha(str(code,20))))throw bad('That code is invalid or has expired.');
+ D.db.prepare('DELETE FROM auth_otps WHERE email=? AND purpose=?').run(email,purpose);
+ return r;
+}
 const api=express.Router();app.use('/api',api);
 /* ---- accounts ---- */
 api.post('/login',wrap((q,s)=>{limit(q);const u=D.db.prepare('SELECT * FROM users WHERE email=?').get(str(q.body.email).toLowerCase());
  if(!u||!eq(u.hash,D.hashPw(String(q.body.pw||''),u.salt)))throw new HE(401,'Email or password is incorrect.');tries.delete(q.ip);session(s,u);return{user:pub(u)}}));
-api.post('/register',wrap((q,s)=>{const em=str(q.body.email).toLowerCase(),name=str(q.body.name);
+api.post('/register',wrap(async q=>{const em=str(q.body.email).toLowerCase(),name=str(q.body.name);
  if(!name)throw bad('Name is required.');if(!EMAIL.test(em))throw bad('Enter a valid email address.');if(!D.pwOk(q.body.pw))throw bad(PWMSG);
  if(D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em)||D.db.prepare("SELECT 1 FROM customers WHERE lower(json_extract(data,'$.email'))=?").get(em))throw bad('An account with this email already exists.');
- const u=D.tx(()=>{const c={id:D.uid(),name,email:em,phone:'',address:''};D.put('customers',c);return D.makeUser(name,em,q.body.pw,'customer',c.id)});session(s,u);return{user:pub(u)}}));
-api.post('/forgot',wrap(q=>{limit(q);const em=str(q.body.email).toLowerCase();let devCode;
- if(D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em)){const tok=crypto.randomBytes(8).toString('hex');D.db.prepare('INSERT OR REPLACE INTO resets VALUES(?,?,?)').run(em,sha(tok),Date.now()+36e5);console.log(`[email] Password reset code for ${em}: ${tok}`);if(!PROD)devCode=tok}
- return{ok:true,devCode}}));
-api.post('/reset',wrap(q=>{limit(q);const em=str(q.body.email).toLowerCase(),r=D.db.prepare('SELECT * FROM resets WHERE email=?').get(em);
- if(!r||r.exp<Date.now()||!eq(r.tok,sha(str(q.body.tok))))throw bad('That code is invalid or has expired.');if(!D.pwOk(q.body.pw))throw bad(PWMSG);
- D.tx(()=>{const salt=D.uid();D.db.prepare('UPDATE users SET salt=?,hash=? WHERE email=?').run(salt,D.hashPw(q.body.pw,salt),em);D.db.prepare('DELETE FROM resets WHERE email=?').run(em);D.db.prepare('DELETE FROM sessions WHERE uid=(SELECT id FROM users WHERE email=?)').run(em)});return{ok:true}}));
+ const salt=D.uid(),hash=D.hashPw(q.body.pw,salt),cid=D.uid();
+ await issueOtp(em,'register',{name,salt,hash,cid});
+ return{pending:true,message:'A verification code has been sent to your email.'}}));
+api.post('/verify-registration',wrap(async(q,s)=>{const em=str(q.body.email).toLowerCase(),r=consumeOtp(em,'register',q.body.tok),p=JSON.parse(r.payload);
+ const u=D.tx(()=>{D.put('customers',{id:p.cid,name:p.name,email:em,phone:'',address:''});return D.makeUserFromHash(p.name,em,p.salt,p.hash,'customer',p.cid)});
+ session(s,u);return{user:pub(u)}}));
+api.post('/forgot',wrap(async q=>{limit(q);const em=str(q.body.email).toLowerCase(),exists=!!D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em);
+ if(exists)await issueOtp(em,'reset');return{ok:true,message:'If that email is registered, a verification code has been sent.'}}));
+api.post('/reset',wrap(q=>{limit(q);const em=str(q.body.email).toLowerCase(),r=consumeOtp(em,'reset',q.body.tok);
+ if(!D.pwOk(q.body.pw))throw bad(PWMSG);
+ D.tx(()=>{const salt=D.uid();D.db.prepare('UPDATE users SET salt=?,hash=? WHERE email=?').run(salt,D.hashPw(q.body.pw,salt),em);D.db.prepare('DELETE FROM sessions WHERE uid=(SELECT id FROM users WHERE email=?)').run(em)});return{ok:true}}));
 api.post('/log',wrap(q=>{D.log('client: '+str(q.body.msg,300));return{ok:1}}));
 api.get('/me',auth,wrap(q=>({user:pub(q.user)})));
 api.post('/logout',auth,wrap((q,s)=>{D.db.prepare('DELETE FROM sessions WHERE token=?').run(q.tok);s.setHeader('Set-Cookie','sid=; Path=/; Max-Age=0');return{ok:1}}));
