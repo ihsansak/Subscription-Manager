@@ -16,6 +16,7 @@
     --sh2: 0 1px 2px rgba(18, 32, 47, .04), 0 12px 32px -16px rgba(18, 32, 47, .14);
     --sh3: 0 24px 60px -12px rgba(8, 16, 26, .35);
     --ring: color-mix(in srgb, var(--ac) 22%, transparent);
+    --login-bg-image: url("../assets/bg.png");
     color-scheme: light;
     box-sizing: border-box;
     padding-top: env(safe-area-inset-top, 0px);
@@ -536,8 +537,13 @@ td:last-child {
 }
 
 #au {
-    max-width: 420px;
-    margin: 0 auto;
+    min-height: 100vh;
+    width: 100%;
+    background-color: var(--bg);
+    background-image: linear-gradient(rgba(8, 16, 26, .46), rgba(8, 16, 26, .46)), var(--login-bg-image);
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
     padding: 56px 16px 40px
 }
 
@@ -552,6 +558,8 @@ td:last-child {
 }
 
 #au .card {
+    max-width: 420px;
+    margin: 0 auto;
     padding: 28px;
     border-radius: 18px;
     box-shadow: var(--sh3);
