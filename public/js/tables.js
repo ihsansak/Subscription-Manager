@@ -129,7 +129,7 @@ function sform(id) {
   fmodal(
     id ? "Edit " + s.number : "New subscription",
     fields(SF, s) + linesBox(s.lines),
-    (d) => {
+    async (d) => {
       const p = by("plans", d.planId),
         L = readLines();
       if (!L.length) return fail("Add at least one product line.");
@@ -144,18 +144,16 @@ function sform(id) {
           `This plan is only available ${p.from || "any time"} to ${p.to || "any time"}.`,
         );
       d.lines = L;
-      if (id) Object.assign(s, d);
-      else {
-        Object.assign(d, {
-          id: uid(),
-          number: "SUB-" + String(DB.seq.sub++).padStart(4, "0"),
-          status: "Draft",
-          paused: false,
-          next: null,
-        });
-        DB.subscriptions.push(d);
-      }
-      save();
+      await api(
+        id
+          ? `/subscriptions/${encodeURIComponent(id)}`
+          : "/subscriptions",
+        {
+          method: id ? "PUT" : "POST",
+          body: JSON.stringify(d),
+        },
+      );
+      await reloadData();
     },
   );
 }
@@ -181,7 +179,11 @@ const SB = (s, w) => {
     }
     if (["Draft", "Quotation"].includes(s.status))
       b += `<button class="b" data-a="sedit" data-id="${s.id}">Edit</button>`;
-  } else if (s.status == "Active" && !s.request) {
+  } else if (
+    s.status == "Active" &&
+    !s.request &&
+    s.changeRequest?.status != "Pending"
+  ) {
     if (p.allowRenew == "yes")
       b += `<button class="b" data-a="req" data-id="${s.id}" data-x="Renewal">Request renewal</button>`;
     b += `<button class="b" data-a="planchange" data-id="${s.id}">Change plan</button>`;
@@ -233,16 +235,20 @@ A.new = (_, e) => (e == "users" ? staffForm() : eform(e));
 A.edit = (i, e) => eform(e, i);
 A.snew = () => sform();
 A.sedit = (i) => sform(i);
-A.arch = (i, e) => {
+A.arch = async (i, e) => {
   if (
     !confirm(
       "Archive this record? It will be hidden from lists but kept in history.",
     )
   )
     return;
-  if (e == "users") DB.users = DB.users.filter((u) => u.id != i);
-  else by(e, i).archived = true;
-  save();
+  await api(
+    e == "users"
+      ? `/staff/${encodeURIComponent(i)}`
+      : `/c/${e}/${encodeURIComponent(i)}`,
+    { method: "DELETE" },
+  );
+  await reloadData();
   render();
 };
 A.addl = () => $("#ls").insertAdjacentHTML("beforeend", lineRow({}));
@@ -250,68 +256,122 @@ A.rml = (_, __, t) => {
   if (document.querySelectorAll("#ls .lr").length > 1)
     t.closest(".lr").remove();
 };
-A.sa = (id, _, __, x) => {
+A.sa = async (id, _, __, x) => {
   const s = by("subscriptions", id),
-    p = by("plans", s.planId),
-    t = today();
-  if (x == "quote") {
-    s.status = "Quotation";
-    s.validUntil = addD(t, 15);
-  } else if (x == "confirm") {
-    if (s.validUntil && s.validUntil < t)
-      return toast("This quotation expired on " + s.validUntil + ".");
-    s.status = "Confirmed";
-  } else if (x == "activate") {
-    s.status = "Active";
-    s.next = s.next || s.start;
-  } else if (x == "pause") {
-    s.paused = true;
-  } else if (x == "resume") {
-    s.paused = false;
-  } else if (x == "renew") {
-    s.expiry = addD(s.expiry, Math.max(1, days(s.start, s.expiry)));
-    s.request = null;
-    toast("Renewed until " + s.expiry);
-  } else if (x == "close") {
-    if (s.expiry > t && p.allowEarly != "yes")
+    p = by("plans", s.planId);
+  if (x == "close") {
+    if (s.expiry > today() && p.allowEarly != "yes")
       return toast("This plan does not allow early closure.");
     if (!confirm("Close " + s.number + "?")) return;
-    s.status = "Closed";
-    s.closed = t;
-    s.request = null;
   }
-  save();
+  const result = await api(`/subscriptions/${encodeURIComponent(id)}/action`, {
+    method: "POST",
+    body: JSON.stringify({ x }),
+  });
+  await reloadData();
   render();
+  toast(result.msg);
 };
-A.req = (id, _, __, x) => {
-  by("subscriptions", id).request = x;
-  save();
+A.req = async (id, _, __, x) => {
+  const result = await api(
+    `/subscriptions/${encodeURIComponent(id)}/request`,
+    {
+      method: "POST",
+      body: JSON.stringify({ x }),
+    },
+  );
+  await reloadData();
   render();
-  toast(x + " request sent to the team.");
+  toast(result.msg);
 };
 
 // Customer self-service: plan changes are requests for staff review; no surprise billing.
 A.planchange = (id) => {
   const s = by("subscriptions", id);
-  if (!s || s.customerId !== ME.cid || s.status !== "Active") return toast("This subscription cannot be changed.");
-  const options = DB.plans.filter(p => !p.archived && p.id !== s.planId);
+  if (
+    !s ||
+    s.customerId !== ME.cid ||
+    s.status !== "Active" ||
+    s.changeRequest?.status == "Pending"
+  )
+    return toast("This subscription cannot be changed.");
+  const options = DB.plans.filter(
+    (p) => !p.archived && p.id !== s.planId,
+  );
   if (!options.length) return toast("No other plans are available.");
-  fmodal("Request a plan change", `<p class="mu">Choose a plan. Your current subscription remains unchanged until the team reviews the request.</p><label>New plan<select name="planId" required>${options.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money(p.price)}/${esc(p.freq)}</option>`).join("")}</select></label><label>Notes<textarea name="note" rows="2" maxlength="300" placeholder="Optional details"></textarea></label>`, d => {
-    s.changeRequest = {fromPlanId:s.planId,toPlanId:d.planId,note:d.note||"",requestedAt:today(),status:"Pending"};
-    save(); toast("Plan change request submitted.");
-  }, "Submit request");
+  fmodal(
+    "Request a plan change",
+    `<p class="mu">Choose a plan. Your current subscription remains unchanged until the team reviews the request.</p><label>New plan<select name="planId" required>${options
+      .map(
+        (p) =>
+          `<option value="${esc(p.id)}">${esc(p.name)} · ${money(p.price)}/${esc(p.freq)}</option>`,
+      )
+      .join("")}</select></label><label>Notes<textarea name="note" rows="2" maxlength="300" placeholder="Optional details"></textarea></label>`,
+    async (d) => {
+      const result = await api(
+        `/subscriptions/${encodeURIComponent(id)}/change-request`,
+        {
+          method: "POST",
+          body: JSON.stringify({ planId: d.planId, note: d.note || "" }),
+        },
+      );
+      await reloadData();
+      toast(result.msg);
+    },
+    "Submit request",
+  );
 };
 
 // Demo payment-method vault stores only display metadata, never card number or CVV.
 A.paymentmethods = () => {
   const c = by("customers", ME.cid) || {};
-  const pm = c.paymentMethod || {};
-  modal(`<h3>Payment methods</h3><p class="mu">Demo mode: this saves payment-method details for display only. Do not enter a real card number or CVV. A payment provider must be connected for secure, real payments.</p><p>${pm.brand ? `${esc(pm.brand)} ending in ${esc(pm.last4)} · expires ${esc(pm.expiry||"-")}` : "No payment method saved."}</p><form id="pmf"><label>Card brand<select name="brand"><option>Visa</option><option>Mastercard</option><option>American Express</option><option>Other</option></select></label><label>Last four digits<input name="last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required value="${esc(pm.last4||"")}"></label><label>Expiry (MM/YY)<input name="expiry" placeholder="MM/YY" pattern="(0[1-9]|1[0-2])/[0-9]{2}" value="${esc(pm.expiry||"")}" required></label><div class="bar"><button type="button" class="b" data-a="close">Cancel</button>${pm.brand?'<button type="button" class="b dn" data-a="paymentremove">Remove</button>':''}<span class="sp"></span><button class="b pr">Save</button></div></form>`);
-  $("#pmf").onsubmit = e => { e.preventDefault(); const d=Object.fromEntries(new FormData(e.currentTarget)); if(!/^\d{4}$/.test(d.last4)||! /^(0[1-9]|1[0-2])\/\d{2}$/.test(d.expiry)) return toast("Enter a valid last-four and expiry."); c.paymentMethod={brand:d.brand,last4:d.last4,expiry:d.expiry}; save(); closeM(); render(); toast("Payment method saved (demo metadata only)."); };
+  const pm = c.paymentMethod || {},
+    brands = ["Visa", "Mastercard", "American Express", "Other"];
+  modal(
+    `<h3>Payment methods</h3><p class="mu">Demo mode: this saves payment-method details for display only. Do not enter a real card number or CVV. A payment provider must be connected for secure, real payments.</p><p>${pm.brand ? `${esc(pm.brand)} ending in ${esc(pm.last4)} · expires ${esc(pm.expiry || "-")}` : "No payment method saved."}</p><form id="pmf"><label>Card brand<select name="brand">${brands
+      .map(
+        (brand) =>
+          `<option${(pm.brand || "Visa") == brand ? " selected" : ""}>${brand}</option>`,
+      )
+      .join("")}</select></label><label>Last four digits<input name="last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required value="${esc(pm.last4 || "")}"></label><label>Expiry (MM/YY)<input name="expiry" placeholder="MM/YY" pattern="(0[1-9]|1[0-2])/[0-9]{2}" value="${esc(pm.expiry || "")}" required></label><div class="bar"><button type="button" class="b" data-a="close">Cancel</button>${pm.brand ? '<button type="button" class="b dn" data-a="paymentremove">Remove</button>' : ""}<span class="sp"></span><button class="b pr">Save</button></div></form>`,
+  );
+  $("#pmf").onsubmit = async (e) => {
+    e.preventDefault();
+    const d = Object.fromEntries(new FormData(e.currentTarget));
+    if (!/^\d{4}$/.test(d.last4) || !/^(0[1-9]|1[0-2])\/\d{2}$/.test(d.expiry))
+      return toast("Enter a valid last-four and expiry.");
+    try {
+      const result = await api("/customer/payment-method", {
+        method: "PUT",
+        body: JSON.stringify(d),
+      });
+      await reloadData();
+      closeM();
+      render();
+      toast(result.msg);
+    } catch (error) {
+      toast(error.message);
+      void log(error);
+    }
+  };
 };
-A.paymentremove = () => { const c=by("customers",ME.cid); if(c) delete c.paymentMethod; save(); closeM(); render(); toast("Saved payment method removed."); };
-A.bill = () => {
-  const n = runBilling();
+A.paymentremove = async () => {
+  try {
+    const result = await api("/customer/payment-method", {
+      method: "DELETE",
+    });
+    await reloadData();
+    closeM();
+    render();
+    toast(result.msg);
+  } catch (error) {
+    toast(error.message);
+    void log(error);
+  }
+};
+A.bill = async () => {
+  const { n } = await api("/billing/run", { method: "POST" });
+  await reloadData();
   render();
   toast(
     n
@@ -330,22 +390,12 @@ A.usetp = (id) => {
       ],
       {},
     ),
-    (d) => {
-      DB.subscriptions.push({
-        id: uid(),
-        number: "SUB-" + String(DB.seq.sub++).padStart(4, "0"),
-        customerId: d.customerId,
-        planId: t.planId,
-        start: d.start,
-        expiry: addM(d.start, 12),
-        terms: "Net 15",
-        status: "Quotation",
-        validUntil: addD(today(), +t.validity || 15),
-        paused: false,
-        next: null,
-        lines: JSON.parse(JSON.stringify(t.lines)),
+    async (d) => {
+      await api(`/templates/${encodeURIComponent(id)}/quote`, {
+        method: "POST",
+        body: JSON.stringify(d),
       });
-      save();
+      await reloadData();
       VIEW = "subscriptions";
       toast("Quotation created");
     },

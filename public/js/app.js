@@ -1,28 +1,12 @@
 /* ---------- backup, log ---------- */
-function log(e) {
-  try {
-    DB.log.push(new Date().toISOString() + " " + (e.message || e));
-    DB.log = DB.log.slice(-50);
-    save();
-  } catch (x) {}
-}
-addEventListener("error", (e) => log(e.message));
-A.bk = () =>
+A.bk = async () => {
+  const [backup, result] = await Promise.all([
+    api("/backup"),
+    api("/logs"),
+  ]);
   modal(
-    `<h3>Backup and error log</h3><p class="mu">Copy this text to back up the database. Paste a backup below and restore it to replace current data.</p><textarea id="bkt" rows="8">${esc(JSON.stringify(DB))}</textarea><div class="bar" style="margin-top:8px"><button class="b dn" data-a="restore">Restore from text</button><span class="sp"></span><button class="b" data-a="close">Close</button></div><h4>Recent errors</h4><pre style="white-space:pre-wrap">${esc((DB.log || []).slice(-8).join("\n") || "No errors logged.")}</pre>`,
+    `<h3>Server backup and error log</h3><p class="mu">This backup is read from the server database. Copy it and store it securely.</p><textarea id="bkt" rows="8" readonly>${esc(JSON.stringify(backup, null, 2))}</textarea><div class="bar" style="margin-top:8px"><span class="sp"></span><button class="b" data-a="close">Close</button></div><h4>Recent server errors</h4><pre style="white-space:pre-wrap">${esc((result.logs || []).slice(-8).join("\n") || "No errors logged.")}</pre>`,
   );
-A.restore = () => {
-  try {
-    const d = JSON.parse($("#bkt").value);
-    if (!d.users || !d.subscriptions) throw 0;
-    DB = d;
-    save();
-    closeM();
-    render();
-    toast("Backup restored");
-  } catch (e) {
-    toast("That text is not a valid backup.");
-  }
 };
 /* ---------- shell ---------- */
 const NAV = {
@@ -77,33 +61,61 @@ function render() {
   $("#bkb").style.display = ME.role == "admin" ? "" : "none";
   (V[VIEW] || V.dashboard)();
 }
-A.go = (v) => {
+A.go = async (v) => {
+  await reloadData();
   VIEW = v;
   Q = "";
   FL = {};
   render();
 };
 A.out = () => {
-  ME = null;
-  clearInterval(window.bt);
-  $("#app").style.display = "none";
-  auth("login");
+  void (async () => {
+    try {
+      await api("/logout", { method: "POST" });
+    } catch (e) {
+      toast(e.message);
+    }
+    ME = null;
+    clearInterval(window.bt);
+    $("#app").style.display = "none";
+    auth("login");
+  })();
 };
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-a]");
   if (!t) return;
   const f = A[t.dataset.a];
-  if (f) f(t.dataset.id, t.dataset.e, t, t.dataset.x);
+  if (f)
+    Promise.resolve(f(t.dataset.id, t.dataset.e, t, t.dataset.x)).catch(
+      (error) => {
+        toast(error.message || "The request failed.");
+        void log(error);
+      },
+    );
 });
-function enter(u) {
+async function enter(u) {
   ME = u;
   VIEW = "dashboard";
+  await reloadData();
+  if (staff()) {
+    await api("/billing/run", { method: "POST" });
+    await reloadData();
+  }
   $("#au").style.display = "none";
   $("#app").style.display = "block";
   if (staff()) {
-    runBilling();
-    window.bt = setInterval(() => {
-      if (runBilling()) render();
+    clearInterval(window.bt);
+    window.bt = setInterval(async () => {
+      try {
+        const { n } = await api("/billing/run", { method: "POST" });
+        if (n) {
+          await reloadData();
+          render();
+        }
+      } catch (error) {
+        toast(error.message);
+        void log(error);
+      }
     }, 60000);
   }
   render();
@@ -140,62 +152,72 @@ function auth(mode, msg = "") {
  <p class="hint">${mode == "login" ? '<a class="l" data-a="au" data-id="register">Create account</a> · <a class="l" data-a="au" data-id="forgot">Forgot password?</a>' : '<a class="l" data-a="au" data-id="login">Back to log in</a>'}</p>${mode == "login" ? '<p class="hint">Demo logins: admin@brightloop.com / Admin@1234 · staff@brightloop.com / Staff@1234 · acme@example.com / Acme@1234</p>' : ""}</div>`;
   $("#af").onsubmit = async (ev) => {
     ev.preventDefault();
-    const d = Object.fromEntries(new FormData(ev.target)),
-      em = (d.email || "").toLowerCase().trim(),
-      u = DB.users.find((x) => x.email == em);
-    if (mode == "login") {
-      if (u && u.hash == (await H(d.pw, u.salt))) return enter(u);
-      return auth(
-        "login",
-        '<p style="color:var(--er)">Email or password is incorrect.</p>',
-      );
-    }
-    if (mode == "register") {
-      if (!pwOk(d.pw)) return toast(PWMSG);
-      if (u || DB.customers.some((c) => c.email.toLowerCase() == em))
-        return toast("An account with this email already exists.");
-      const c = { id: uid(), name: d.name, email: em, phone: "", address: "" };
-      DB.customers.push(c);
-      const n = await mkUser(d.name, em, d.pw, "customer", c.id);
-      DB.users.push(n);
-      save();
-      return enter(n);
-    }
-    if (mode == "forgot") {
-      const tok = uid() + uid();
-      let pv = "";
-      if (u) {
-        DB.resets[em] = { tok, exp: Date.now() + 36e5 };
-        save();
-        pv = `<div class="pv">Demo mailbox: your reset code is <b>${tok}</b> (valid for 1 hour). A real deployment would email this link.</div>`;
+    const d = Object.fromEntries(new FormData(ev.target));
+    try {
+      if (mode == "login") {
+        const { user } = await api("/login", {
+          method: "POST",
+          body: JSON.stringify({ email: d.email, pw: d.pw }),
+        });
+        await enter(user);
+      } else if (mode == "register") {
+        const { user } = await api("/register", {
+          method: "POST",
+          body: JSON.stringify({ name: d.name, email: d.email, pw: d.pw }),
+        });
+        await enter(user);
+      } else if (mode == "forgot") {
+        const { devCode } = await api("/forgot", {
+          method: "POST",
+          body: JSON.stringify({ email: d.email }),
+        });
+        const preview = devCode
+          ? `<div class="pv">Demo mailbox: your reset code is <b>${esc(devCode)}</b> (valid for 1 hour).</div>`
+          : "";
+        auth(
+          "reset",
+          '<p class="mu">If that email is registered, a reset message is on its way.</p>' +
+            preview,
+        );
+      } else if (mode == "reset") {
+        await api("/reset", {
+          method: "POST",
+          body: JSON.stringify({
+            email: d.email,
+            tok: d.tok,
+            pw: d.pw,
+          }),
+        });
+        auth(
+          "login",
+          '<p style="color:var(--ok)">Password updated. Log in with your new password.</p>',
+        );
       }
-      return auth(
-        "reset",
-        '<p class="mu">If that email is registered, a reset message is on its way.</p>' +
-          pv,
-      );
-    }
-    if (mode == "reset") {
-      const r = DB.resets[em];
-      if (!u || !r || r.tok != d.tok.trim() || r.exp < Date.now())
-        return toast("That code is invalid or has expired.");
-      if (!pwOk(d.pw)) return toast(PWMSG);
-      u.salt = uid();
-      u.hash = await H(d.pw, u.salt);
-      delete DB.resets[em];
-      save();
-      auth(
-        "login",
-        '<p style="color:var(--ok)">Password updated. Log in with your new password.</p>',
-      );
+    } catch (error) {
+      const message =
+        mode == "login" && error.message == "Email or password is incorrect."
+          ? "Email or password is incorrect."
+          : error.message;
+      if (mode == "login")
+        return auth(
+          "login",
+          `<p style="color:var(--er)">${esc(message)}</p>`,
+        );
+      toast(message);
     }
   };
 }
 A.au = (m) => auth(m);
 (async () => {
   try {
-    DB = JSON.parse(localStorage.getItem(KEY));
-  } catch (e) {}
-  if (!DB || !DB.users) await seed();
-  auth("login");
+    const { user } = await api("/me");
+    await enter(user);
+  } catch (error) {
+    auth(
+      "login",
+      error.status != 401
+        ? `<p style="color:var(--er)">${esc(error.message)}</p>`
+        : "",
+    );
+  }
 })();

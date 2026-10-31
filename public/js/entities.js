@@ -235,19 +235,19 @@ function fmodal(title, body, onsave, btn = "Save") {
   modal(
     `<h3>${title}</h3><form id="fm">${body}<div class="bar" style="margin-top:12px"><span class="sp"></span><button type="button" class="b" data-a="close">Cancel</button><button class="b pr">${btn}</button></div></form>`,
   );
-  $("#fm").onsubmit = (ev) => {
+  $("#fm").onsubmit = async (ev) => {
     ev.preventDefault();
     const d = {};
     $("#fm")
       .querySelectorAll("[name]")
       .forEach((i) => (d[i.name] = i.value));
     try {
-      if (onsave(d) !== false) {
+      if ((await onsave(d)) !== false) {
         closeM();
         render();
       }
     } catch (e) {
-      log(e);
+      void log(e);
       toast("Something went wrong: " + e.message);
     }
   };
@@ -316,7 +316,7 @@ function eform(ent, id) {
   fmodal(
     (id ? "Edit " : "New ") + e.s,
     fields(e.f, rr) + (e.lines ? linesBox(r.lines || []) : ""),
-    (d) => {
+    async (d) => {
       e.f.forEach((f) => {
         if (f.t == "number") d[f.k] = +d[f.k] || 0;
       });
@@ -329,12 +329,14 @@ function eform(ent, id) {
         if (m) return fail(m);
       }
       if (e.out) e.out(d);
-      if (id) Object.assign(r, d);
-      else {
-        d.id = uid();
-        DB[ent].push(d);
-      }
-      save();
+      await api(
+        id ? `/c/${ent}/${encodeURIComponent(id)}` : `/c/${ent}`,
+        {
+          method: id ? "PUT" : "POST",
+          body: JSON.stringify(d),
+        },
+      );
+      await reloadData();
     },
   );
 }
@@ -349,16 +351,16 @@ function staffForm() {
       ],
       {},
     ),
-    (d) => {
+    async (d) => {
       if (!pwOk(d.pw)) return fail(PWMSG);
       if (DB.users.some((u) => u.email == d.email.toLowerCase()))
         return fail("That email is already registered.");
-      mkUser(d.name, d.email, d.pw, "staff").then((u) => {
-        DB.users.push(u);
-        save();
-        render();
-        toast("Staff account created");
+      await api("/staff", {
+        method: "POST",
+        body: JSON.stringify(d),
       });
+      await reloadData();
+      toast("Staff account created");
     },
   );
 }

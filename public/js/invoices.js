@@ -52,15 +52,17 @@ V.invoices = () => {
     `<select id="is" class="flt" aria-label="Status"><option value="">All statuses</option>${sts.map((x) => `<option>${x}</option>`).join("")}</select><input type="date" id="if" class="flt" aria-label="From"><input type="date" id="it" class="flt" aria-label="To">`,
   );
 };
-A.ia = (id, _, __, x) => {
+A.ia = async (id, _, __, x) => {
   const i = by("invoices", id);
-  if (x == "confirm") i.status = "Confirmed";
-  else {
+  if (x != "confirm") {
     if (!confirm("Cancel " + i.number + "?")) return;
-    i.status = "Cancelled";
   }
-  save();
+  const result = await api(`/invoices/${encodeURIComponent(id)}/${x}`, {
+    method: "POST",
+  });
+  await reloadData();
   render();
+  toast(result.msg);
 };
 A.iview = (id) => {
   const i = by("invoices", id),
@@ -69,13 +71,13 @@ A.iview = (id) => {
   modal(`<h3>Invoice ${i.number} ${badge(istat(i)).raw}</h3><p class="mu">${esc(c)}<br>${esc(cu.address || "")}<br>Issued ${i.issue} · Due ${i.due} · Billing period starting ${i.period} · ${esc(nm("subscriptions", i.subId) === "-" ? (by("subscriptions", i.subId) || {}).number : "")}</p>${linesTbl(i)}<p style="text-align:right">Paid ${money(paid(i))} · <b>Outstanding ${money(owed(i))}</b></p>
  <div class="bar noprint"><span class="sp"></span>${staff() && i.status != "Draft" && i.status != "Cancelled" ? `<button class="b" data-a="send" data-id="${i.id}">Send to customer</button>` : ""}<button class="b" onclick="window.print()">Print or save PDF</button><button class="b" data-a="close">Close</button></div>`);
 };
-A.send = (id) => {
-  const i = by("invoices", id);
-  i.sent = true;
-  save();
-  toast(
-    `Invoice ${i.number} sent to ${(by("customers", i.customerId) || {}).email} (demo: no real email is sent).`,
-  );
+A.send = async (id) => {
+  const result = await api(`/invoices/${encodeURIComponent(id)}/send`, {
+    method: "POST",
+  });
+  await reloadData();
+  render();
+  toast(result.msg);
 };
 A.pay = (id) => pform(id);
 function pform(inv) {
@@ -111,7 +113,7 @@ function pform(inv) {
       ],
       {},
     ),
-    (d) => {
+    async (d) => {
       const i = by("invoices", d.invoiceId),
         a = +d.amount;
       if (!(a > 0)) return fail("Enter an amount above zero.");
@@ -119,20 +121,18 @@ function pform(inv) {
         return fail(
           "That is more than the outstanding " + money(owed(i)) + ".",
         );
-      DB.payments.push({
-        id: uid(),
-        invoiceId: i.id,
-        method: d.method,
-        amount: a,
-        date: d.date,
-        note: d.note,
+      const result = await api("/payments", {
+        method: "POST",
+        body: JSON.stringify({
+          invoiceId: i.id,
+          method: d.method,
+          amount: a,
+          date: d.date,
+          note: d.note,
+        }),
       });
-      save();
-      if (owed(i) <= 0.005) {
-        i.status = "Paid";
-        save();
-      }
-      toast("Payment recorded");
+      await reloadData();
+      toast(result.msg);
     },
     "Save payment",
   );
@@ -264,13 +264,21 @@ A.profile = () => {
     { k: "email", l: "Email address", t: "email", r: 1 },
     { k: "phone", l: "Phone" },
     { k: "address", l: "Billing address", t: "textarea" },
-  ], c), d => {
+  ], c), async d => {
     const em = d.email.trim().toLowerCase();
     if (!d.name.trim() || !em) return fail("Name and email are required.");
-    if (DB.customers.some(x => x.id !== c.id && !x.archived && x.email.toLowerCase() === em)) return fail("That email already belongs to another customer.");
-    c.name = d.name.trim(); c.email = em; c.phone = d.phone.trim(); c.address = d.address.trim();
-    ME.name = c.name; ME.email = em;
-    const u = DB.users.find(x => x.id === ME.id); if (u) { u.name = c.name; u.email = em; }
-    save(); render(); toast("Billing profile updated.");
+    const result = await api("/customer/profile", {
+      method: "PUT",
+      body: JSON.stringify({
+        name: d.name.trim(),
+        email: em,
+        phone: d.phone.trim(),
+        address: d.address.trim(),
+      }),
+    });
+    ME = result.user;
+    await reloadData();
+    render();
+    toast(result.msg);
   });
 };

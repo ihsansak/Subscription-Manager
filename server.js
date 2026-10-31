@@ -42,12 +42,23 @@ api.post('/logout',auth,wrap((q,s)=>{D.db.prepare('DELETE FROM sessions WHERE to
 /* ---- data for the signed-in role ---- */
 api.get('/bootstrap',auth,wrap(q=>{const u=q.user,cu=u.role=='customer',o={};
  for(const c of ['products','plans','taxes','discounts'])o[c]=D.all(c);
- if(!cu){o.templates=D.all('templates');o.customers=D.all('customers');o.subscriptions=D.all('subscriptions');o.invoices=D.all('invoices');o.payments=D.all('payments');
+ if(!cu){o.templates=D.all('templates');o.customers=D.all('customers').map(({paymentMethod,...c})=>c);o.subscriptions=D.all('subscriptions');o.invoices=D.all('invoices');o.payments=D.all('payments');
   o.users=u.role=='admin'?D.db.prepare("SELECT id,name,email,role FROM users WHERE role='staff'").all():[]}
  else{const w="json_extract(data,'$.customerId')=?";o.templates=[];o.users=[];o.customers=D.all('customers','id=?',u.cid);o.subscriptions=D.all('subscriptions',w,u.cid);
   o.invoices=D.all('invoices',w+" AND json_extract(data,'$.status')!='Draft'",u.cid);o.payments=D.all('payments',"json_extract(data,'$.invoiceId') IN (SELECT id FROM invoices WHERE "+w+")",u.cid)}
  const sums={};D.db.prepare("SELECT json_extract(data,'$.invoiceId') k,SUM(json_extract(data,'$.amount')) s FROM payments GROUP BY k").all().forEach(r=>sums[r.k]=r.s);
  o.invoices.forEach(i=>i.paid=BL.r2(sums[i.id]||0));return o}));
+api.put('/customer/profile',auth,need('customer'),wrap(q=>{const b=q.body,em=str(b.email).toLowerCase(),name=str(b.name);
+ if(!name)throw bad('Name is required.');if(!EMAIL.test(em))throw bad('Enter a valid email address.');
+ if(D.db.prepare('SELECT 1 FROM users WHERE email=? AND id!=?').get(em,q.user.id)||
+    D.db.prepare("SELECT 1 FROM customers WHERE lower(json_extract(data,'$.email'))=? AND id!=? AND COALESCE(json_extract(data,'$.archived'),0)=0").get(em,q.user.cid))throw bad('That email already belongs to another account.');
+ const customer=D.get('customers',q.user.cid);if(!customer)throw nf('Customer profile not found.');
+ const updated=D.tx(()=>{D.put('customers',{...customer,name,email:em,phone:str(b.phone,100),address:str(b.address,500)});D.db.prepare('UPDATE users SET name=?,email=? WHERE id=?').run(name,em,q.user.id);return D.db.prepare('SELECT * FROM users WHERE id=?').get(q.user.id)});
+ return{msg:'Billing profile updated.',user:pub(updated)}}));
+api.put('/customer/payment-method',auth,need('customer'),wrap(q=>{const b=q.body,brands=['Visa','Mastercard','American Express','Other'];
+ const last4=typeof b.last4=='string'?b.last4.trim():'',expiry=typeof b.expiry=='string'?b.expiry.trim():'',brand=str(b.brand,30);if(!brands.includes(brand)||!/^\d{4}$/.test(last4)||! /^(0[1-9]|1[0-2])\/\d{2}$/.test(expiry))throw bad('Enter valid payment-method details.');
+ const c=D.get('customers',q.user.cid);if(!c)throw nf('Customer profile not found.');D.put('customers',{...c,paymentMethod:{brand,last4,expiry}});return{msg:'Payment method saved (demo metadata only).'}}));
+api.delete('/customer/payment-method',auth,need('customer'),wrap(q=>{const c=D.get('customers',q.user.cid);if(!c)throw nf('Customer profile not found.');delete c.paymentMethod;D.put('customers',c);return{msg:'Saved payment method removed.'}}));
 /* ---- master data (generic, role-checked, whitelisted) ---- */
 const W={customers:['admin','staff'],products:['admin'],plans:['admin'],templates:['admin','staff'],taxes:['admin'],discounts:['admin']};
 const FLD={customers:['name','email','phone','address'],products:['name','type','sales','cost','notes'],plans:['name','price','freq','minQty','from','to','autoClose','allowEarly','allowPause','allowRenew'],templates:['name','planId','validity'],taxes:['name','rate'],discounts:['name','type','value','minAmount','minQty','from','to','max','appliesTo','active']};
@@ -92,6 +103,10 @@ api.post('/subscriptions/:id/action',auth,STAFF,wrap(q=>D.tx(()=>{const s=D.get(
  D.put('subscriptions',s);return{msg}})));
 api.post('/subscriptions/:id/request',auth,need('customer'),wrap(q=>{const s=D.get('subscriptions',q.params.id);if(!s||s.customerId!=q.user.cid)throw nf();const t=q.body.x;
  if(!['Renewal','Cancellation'].includes(t))throw bad('Unknown request.');if(s.status!='Active'||s.request)throw bad('A request is already open or the subscription is not active.');s.request=t;D.put('subscriptions',s);return{msg:t+' request sent to the team.'}}));
+api.post('/subscriptions/:id/change-request',auth,need('customer'),wrap(q=>{const s=D.get('subscriptions',q.params.id);if(!s||s.customerId!=q.user.cid)throw nf();const plan=D.get('plans',str(q.body.planId,40));
+ if(s.status!='Active'||s.changeRequest?.status=='Pending')throw bad('This subscription cannot be changed right now.');
+ if(!plan||plan.archived||plan.id==s.planId)throw bad('Choose a different active plan.');
+ s.changeRequest={fromPlanId:s.planId,toPlanId:plan.id,note:str(q.body.note,300),requestedAt:today(),status:'Pending'};D.put('subscriptions',s);return{msg:'Plan change request submitted.'}}));
 api.post('/templates/:id/quote',auth,STAFF,wrap(q=>{const t=D.get('templates',q.params.id);if(!t)throw nf();const start=str(q.body.start,10);if(!isDate(start)||!D.get('customers',str(q.body.customerId,40)))throw bad('Choose a customer and a valid start date.');
  D.tx(()=>D.put('subscriptions',{id:D.uid(),number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),customerId:q.body.customerId,planId:t.planId,start,expiry:BL.addM(start,12),terms:'Net 15',status:'Quotation',validUntil:BL.addD(today(),+t.validity||15),paused:false,next:null,lines:t.lines}));return{msg:'Quotation created.'}}));
 /* ---- billing, invoices, payments ---- */
