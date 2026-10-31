@@ -200,7 +200,7 @@ V.dashboard = () => {
         ],
         ["Overdue invoices", ii.filter((i) => istat(i) == "Overdue").length],
       ]) +
-      `<p class="mu">Use the tabs above to view subscriptions, download invoices and see your payment history.</p>`;
+      `<div class="bar"><button class="b pr" data-a="profile">Manage billing profile</button><button class="b" data-a="go" data-id="subscriptions">View subscriptions</button><button class="b" data-a="go" data-id="invoices">View invoices</button></div><p class="mu">Manage your subscription details, review upcoming billing, and access invoices and payment history from this portal.</p>`;
     return;
   }
   const f = FL,
@@ -266,5 +266,26 @@ V.dashboard = () => {
       FL[i.id] = i.value;
       render();
     };
+  });
+};
+
+/* Customer self-service billing profile */
+A.profile = () => {
+  if (!myC()) return;
+  const c = by("customers", ME.cid);
+  if (!c) return toast("Customer profile not found.");
+  fmodal("Manage billing profile", fields([
+    { k: "name", l: "Full name", r: 1 },
+    { k: "email", l: "Email address", t: "email", r: 1 },
+    { k: "phone", l: "Phone" },
+    { k: "address", l: "Billing address", t: "textarea" },
+  ], c), d => {
+    const em = d.email.trim().toLowerCase();
+    if (!d.name.trim() || !em) return fail("Name and email are required.");
+    if (DB.customers.some(x => x.id !== c.id && !x.archived && x.email.toLowerCase() === em)) return fail("That email already belongs to another customer.");
+    c.name = d.name.trim(); c.email = em; c.phone = d.phone.trim(); c.address = d.address.trim();
+    ME.name = c.name; ME.email = em;
+    const u = DB.users.find(x => x.id === ME.id); if (u) { u.name = c.name; u.email = em; }
+    save(); render(); toast("Billing profile updated.");
   });
 };
