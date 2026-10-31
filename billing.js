@@ -12,7 +12,7 @@ function runBilling(){const t=new Date().toISOString().slice(0,10);
       c.used.forEach(id=>{const d=discs.find(x=>x.id==id);d.used=(d.used||0)+1;touched.add(id)});
       D.put('invoices',{id:D.uid(),number:'INV-'+String(D.seq('inv')).padStart(4,'0'),key,subId:s.id,customerId:s.customerId,issue:t,period:s.next,due:BL.addD(t,BL.termD(s.terms)),lines:c.lines,subtotal:c.subtotal,discount:c.discount,tax:c.tax,total:c.total,status:'Draft',sent:false});n++}
      s.next=BL.nextP(s.next,p.freq);ch=true}}
-   if(s.expiry<t&&p.autoClose=='yes'){s.status='Closed';s.closed=t;ch=true}
+   if(s.expiry<t&&p.autoClose=='yes'){s.status='Closed';s.closed=t;D.addSubEvent(s.id,'Closed',null,{automatic:true});ch=true}
    if(ch)D.put('subscriptions',s)}
   touched.forEach(id=>D.put('discounts',discs.find(x=>x.id==id)));
   return n})}

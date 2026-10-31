@@ -168,6 +168,8 @@ const SB = (s, w) => {
     if (s.status == "Confirmed")
       b += `<button class="b pr" data-a="sa" data-id="${s.id}" data-x="activate">Activate</button>`;
     if (s.status == "Active") {
+      if (s.changeRequest?.status == "Pending")
+        b += `<button class="b pr" data-a="sa" data-id="${s.id}" data-x="change-plan">Approve plan change</button>`;
       b += s.paused
         ? `<button class="b" data-a="sa" data-id="${s.id}" data-x="resume">Resume</button>`
         : p.allowPause == "yes"
@@ -406,8 +408,9 @@ const linesTbl = (c) =>
   `<div class="tw"><table><thead><tr><th>Item</th><th>Qty</th><th>Unit price</th><th>Amount</th><th>Tax</th></tr></thead><tbody>${c.lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${l.qty}</td><td>${money(l.price)}</td><td>${money(l.net)}</td><td>${money(l.tax)} (${l.rate}%)</td></tr>`).join("")}</tbody></table></div><p style="text-align:right">Subtotal ${money(c.subtotal)}<br>Discount −${money(c.discount)}<br>Tax ${money(c.tax)}<br><b>Total ${money(c.total)}</b></p>`;
 A.sview = (id) => {
   const s = by("subscriptions", id),
-    c = calc(s.lines);
+    c = calc(s.lines),
+    events = subEvents(id);
   modal(
-    `<h3>${s.number} ${badge(s.status).raw}</h3><p class="mu">${esc(nm("customers", s.customerId))} · ${esc(nm("plans", s.planId))} · ${s.start} to ${s.expiry} · ${s.terms}${s.validUntil && s.status == "Quotation" ? " · quote valid until " + s.validUntil : ""}</p>${linesTbl(c)}<p class="mu">Totals include any discounts that apply today.</p><div class="bar"><span class="sp"></span><button class="b" data-a="close">Close</button></div>`,
+    `<h3>${s.number} ${badge(s.status).raw}</h3><p class="mu">${esc(nm("customers", s.customerId))} · ${esc(nm("plans", s.planId))} · ${s.start} to ${s.expiry} · ${s.terms}${s.validUntil && s.status == "Quotation" ? " · quote valid until " + s.validUntil : ""}</p>${linesTbl(c)}<h4>History</h4><div class="tw"><table><thead><tr><th>Event</th><th>When</th></tr></thead><tbody>${events.map((e) => `<tr><td>${esc(e.type)}</td><td>${esc(new Date(e.occurredAt).toLocaleString())}</td></tr>`).join("") || '<tr><td colspan="2" class="mu">No history available.</td></tr>'}</tbody></table></div><p class="mu">Totals include any discounts that apply today.</p><div class="bar"><span class="sp"></span><button class="b" data-a="close">Close</button></div>`,
   );
 };

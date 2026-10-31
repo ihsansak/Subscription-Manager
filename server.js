@@ -42,9 +42,9 @@ api.post('/logout',auth,wrap((q,s)=>{D.db.prepare('DELETE FROM sessions WHERE to
 /* ---- data for the signed-in role ---- */
 api.get('/bootstrap',auth,wrap(q=>{const u=q.user,cu=u.role=='customer',o={};
  for(const c of ['products','plans','taxes','discounts'])o[c]=D.all(c);
- if(!cu){o.templates=D.all('templates');o.customers=D.all('customers').map(({paymentMethod,...c})=>c);o.subscriptions=D.all('subscriptions');o.invoices=D.all('invoices');o.payments=D.all('payments');
+ if(!cu){o.templates=D.all('templates');o.customers=D.all('customers').map(({paymentMethod,...c})=>c);o.subscriptions=D.all('subscriptions');o.subscriptionEvents=D.db.prepare('SELECT id,subscription_id subscriptionId,type,occurred_at occurredAt,actor_id actorId,details FROM subscription_events ORDER BY id').all().map(e=>({...e,details:JSON.parse(e.details)}));o.invoices=D.all('invoices');o.payments=D.all('payments');
   o.users=u.role=='admin'?D.db.prepare("SELECT id,name,email,role FROM users WHERE role='staff'").all():[]}
- else{const w="json_extract(data,'$.customerId')=?";o.templates=[];o.users=[];o.customers=D.all('customers','id=?',u.cid);o.subscriptions=D.all('subscriptions',w,u.cid);
+ else{const w="json_extract(data,'$.customerId')=?";o.templates=[];o.users=[];o.customers=D.all('customers','id=?',u.cid);o.subscriptions=D.all('subscriptions',w,u.cid);o.subscriptionEvents=D.db.prepare("SELECT e.id,e.subscription_id subscriptionId,e.type,e.occurred_at occurredAt,e.actor_id actorId,e.details FROM subscription_events e JOIN subscriptions s ON s.id=e.subscription_id WHERE json_extract(s.data,'$.customerId')=? ORDER BY e.id").all(u.cid).map(e=>({...e,details:JSON.parse(e.details)}));
   o.invoices=D.all('invoices',w+" AND json_extract(data,'$.status')!='Draft'",u.cid);o.payments=D.all('payments',"json_extract(data,'$.invoiceId') IN (SELECT id FROM invoices WHERE "+w+")",u.cid)}
  const sums={};D.db.prepare("SELECT json_extract(data,'$.invoiceId') k,SUM(json_extract(data,'$.amount')) s FROM payments GROUP BY k").all().forEach(r=>sums[r.k]=r.s);
  o.invoices.forEach(i=>i.paid=BL.r2(sums[i.id]||0));return o}));
@@ -88,19 +88,20 @@ function subInput(b){const o={customerId:str(b.customerId,40),planId:str(b.planI
  if(!['Immediate','Net 15','Net 30'].includes(o.terms))throw bad('Choose payment terms.');o.lines=cleanLines(b.lines);
  if(o.lines.reduce((a,l)=>a+l.qty,0)<(p.minQty||0))throw bad(`This plan needs a total quantity of at least ${p.minQty}.`);
  if((p.from&&o.start<p.from)||(p.to&&o.start>p.to))throw bad(`This plan is only available ${p.from||'any time'} to ${p.to||'any time'}.`);return o}
-api.post('/subscriptions',auth,STAFF,wrap(q=>{const o=subInput(q.body);D.tx(()=>D.put('subscriptions',{id:D.uid(),number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),...o,status:'Draft',paused:false,next:null}));return{msg:'Subscription created.'}}));
+api.post('/subscriptions',auth,STAFF,wrap(q=>{const o=subInput(q.body);D.tx(()=>{const s={id:D.uid(),number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),...o,status:'Draft',paused:false,next:null};D.put('subscriptions',s);D.addSubEvent(s.id,'Created',q.user.id)});return{msg:'Subscription created.'}}));
 api.put('/subscriptions/:id',auth,STAFF,wrap(q=>{const s=D.get('subscriptions',q.params.id);if(!s)throw nf();if(!['Draft','Quotation'].includes(s.status))throw bad('Only draft or quotation subscriptions can be edited.');D.put('subscriptions',{...s,...subInput(q.body)});return{msg:'Saved.'}}));
-api.post('/subscriptions/:id/action',auth,STAFF,wrap(q=>D.tx(()=>{const s=D.get('subscriptions',q.params.id);if(!s)throw nf('Subscription not found.');const p=D.get('plans',s.planId)||{},t=today(),x=q.body.x;let msg='Updated.';
+api.post('/subscriptions/:id/action',auth,STAFF,wrap(q=>D.tx(()=>{const s=D.get('subscriptions',q.params.id);if(!s)throw nf('Subscription not found.');const p=D.get('plans',s.planId)||{},t=today(),x=q.body.x;let msg='Updated.',event=null,details={};
  const is=(...a)=>{if(!a.includes(s.status))throw bad(`That is not possible while the subscription is ${s.status}.`)};
- if(x=='quote'){is('Draft');s.status='Quotation';s.validUntil=BL.addD(t,15)}
- else if(x=='confirm'){is('Quotation');if(s.validUntil&&s.validUntil<t)throw bad('This quotation expired on '+s.validUntil+'.');s.status='Confirmed';msg='Quotation converted to a subscription.'}
- else if(x=='activate'){is('Confirmed');s.status='Active';s.next=s.next||s.start;msg='Subscription is active.'}
- else if(x=='pause'){is('Active');if(p.allowPause!='yes')throw bad('This plan does not allow pausing.');s.paused=true}
- else if(x=='resume'){is('Active');s.paused=false}
- else if(x=='renew'){is('Active');if(p.allowRenew!='yes')throw bad('This plan does not allow renewal.');s.expiry=BL.addD(s.expiry,Math.max(1,BL.days(s.start,s.expiry)));s.request=null;msg='Renewed until '+s.expiry+'.'}
- else if(x=='close'){is('Active');if(s.expiry>t&&p.allowEarly!='yes')throw bad('This plan does not allow early closure.');s.status='Closed';s.closed=t;s.request=null;msg='Subscription closed.'}
+ if(x=='quote'){is('Draft');s.status='Quotation';s.validUntil=BL.addD(t,15);event='Quoted'}
+ else if(x=='confirm'){is('Quotation');if(s.validUntil&&s.validUntil<t)throw bad('This quotation expired on '+s.validUntil+'.');s.status='Confirmed';event='Confirmed';msg='Quotation converted to a subscription.'}
+ else if(x=='activate'){is('Confirmed');s.status='Active';s.next=s.next||s.start;event='Activated';msg='Subscription is active.'}
+ else if(x=='pause'){is('Active');if(p.allowPause!='yes')throw bad('This plan does not allow pausing.');s.paused=true;event='Paused'}
+ else if(x=='resume'){is('Active');s.paused=false;event='Resumed'}
+ else if(x=='renew'){is('Active');if(p.allowRenew!='yes')throw bad('This plan does not allow renewal.');const oldExpiry=s.expiry;s.expiry=BL.addD(s.expiry,Math.max(1,BL.days(s.start,s.expiry)));s.request=null;event='Renewed';details={from:oldExpiry,to:s.expiry};msg='Renewed until '+s.expiry+'.'}
+ else if(x=='change-plan'){is('Active');const r=s.changeRequest;if(!r||r.status!='Pending')throw bad('There is no pending plan change request.');const next=D.get('plans',r.toPlanId);if(!next||next.archived)throw bad('The requested plan is no longer available.');s.planId=next.id;s.changeRequest={...r,status:'Approved',approvedAt:t};event='Plan changed';details={fromPlanId:r.fromPlanId,toPlanId:next.id}}
+ else if(x=='close'){is('Active');if(s.expiry>t&&p.allowEarly!='yes')throw bad('This plan does not allow early closure.');const wasCancellation=s.request=='Cancellation';s.status='Closed';s.closed=t;s.request=null;event=wasCancellation?'Cancelled':'Closed';msg='Subscription closed.'}
  else throw bad('Unknown action.');
- D.put('subscriptions',s);return{msg}})));
+ D.put('subscriptions',s);if(event)D.addSubEvent(s.id,event,q.user.id,details);return{msg}})));
 api.post('/subscriptions/:id/request',auth,need('customer'),wrap(q=>{const s=D.get('subscriptions',q.params.id);if(!s||s.customerId!=q.user.cid)throw nf();const t=q.body.x;
  if(!['Renewal','Cancellation'].includes(t))throw bad('Unknown request.');if(s.status!='Active'||s.request)throw bad('A request is already open or the subscription is not active.');s.request=t;D.put('subscriptions',s);return{msg:t+' request sent to the team.'}}));
 api.post('/subscriptions/:id/change-request',auth,need('customer'),wrap(q=>{const s=D.get('subscriptions',q.params.id);if(!s||s.customerId!=q.user.cid)throw nf();const plan=D.get('plans',str(q.body.planId,40));
@@ -108,7 +109,7 @@ api.post('/subscriptions/:id/change-request',auth,need('customer'),wrap(q=>{cons
  if(!plan||plan.archived||plan.id==s.planId)throw bad('Choose a different active plan.');
  s.changeRequest={fromPlanId:s.planId,toPlanId:plan.id,note:str(q.body.note,300),requestedAt:today(),status:'Pending'};D.put('subscriptions',s);return{msg:'Plan change request submitted.'}}));
 api.post('/templates/:id/quote',auth,STAFF,wrap(q=>{const t=D.get('templates',q.params.id);if(!t)throw nf();const start=str(q.body.start,10);if(!isDate(start)||!D.get('customers',str(q.body.customerId,40)))throw bad('Choose a customer and a valid start date.');
- D.tx(()=>D.put('subscriptions',{id:D.uid(),number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),customerId:q.body.customerId,planId:t.planId,start,expiry:BL.addM(start,12),terms:'Net 15',status:'Quotation',validUntil:BL.addD(today(),+t.validity||15),paused:false,next:null,lines:t.lines}));return{msg:'Quotation created.'}}));
+ D.tx(()=>{const s={id:D.uid(),number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),customerId:q.body.customerId,planId:t.planId,start,expiry:BL.addM(start,12),terms:'Net 15',status:'Quotation',validUntil:BL.addD(today(),+t.validity||15),paused:false,next:null,lines:t.lines};D.put('subscriptions',s);D.addSubEvent(s.id,'Created',q.user.id);D.addSubEvent(s.id,'Quoted',q.user.id)});return{msg:'Quotation created.'}}));
 /* ---- billing, invoices, payments ---- */
 api.post('/billing/run',auth,STAFF,wrap(()=>({n:runBilling()})));
 api.post('/invoices/:id/:x',auth,STAFF,wrap(q=>D.tx(()=>{const i=D.get('invoices',q.params.id);if(!i)throw nf();const x=q.params.x;let msg='Updated.';
@@ -128,7 +129,7 @@ api.post('/staff',auth,need('admin'),wrap(q=>{const em=str(q.body.email).toLower
  if(D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em))throw bad('That email is already registered.');D.makeUser(name,em,q.body.pw,'staff');return{msg:'Staff account created.'}}));
 api.delete('/staff/:id',auth,need('admin'),wrap(q=>{D.db.prepare("DELETE FROM users WHERE id=? AND role='staff'").run(q.params.id);return{msg:'Staff account removed.'}}));
 api.get('/logs',auth,need('admin'),wrap(()=>({logs:D.db.prepare('SELECT t,msg FROM logs ORDER BY id DESC LIMIT 20').all().map(r=>r.t+' '+r.msg)})));
-api.get('/backup',auth,need('admin'),(q,s)=>{const o={exported:new Date().toISOString()};D.COLL.forEach(c=>o[c]=D.all(c));o.users=D.db.prepare('SELECT id,name,email,role,cid FROM users').all();
+api.get('/backup',auth,need('admin'),(q,s)=>{const o={exported:new Date().toISOString()};D.COLL.forEach(c=>o[c]=D.all(c));o.subscriptionEvents=D.db.prepare('SELECT id,subscription_id subscriptionId,type,occurred_at occurredAt,actor_id actorId,details FROM subscription_events ORDER BY id').all().map(e=>({...e,details:JSON.parse(e.details)}));o.users=D.db.prepare('SELECT id,name,email,role,cid FROM users').all();
  s.setHeader('Content-Disposition','attachment; filename="brightloop-backup.json"');s.json(o)});
 api.use((q,s,n)=>n(nf()));
 app.use(express.static(path.join(__dirname,'public')));app.use('/shared',express.static(path.join(__dirname,'shared')));

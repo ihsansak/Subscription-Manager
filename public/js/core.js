@@ -43,6 +43,7 @@ const by = (c, id) => {
   return C[c].get(id);
 };
 const nm = (c, id) => by(c, id)?.name || "-";
+const subEvents = (id) => (DB.subscriptionEvents || []).filter((e) => e.subscriptionId == id);
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body !== undefined) headers.set("Content-Type", "application/json");
