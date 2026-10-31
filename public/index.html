@@ -14,8 +14,17 @@
     <div id="app" style="display: none">
       <header>
         <h1>Bright<i>loop</i></h1>
-        <span class="sp"></span><span id="who"></span
-        ><button class="b" data-a="bk" id="bkb">Backup</button
+        <span class="sp"></span><span id="who"></span>
+        <label class="currency-picker">Currency
+          <select id="currency" aria-label="Display currency">
+            <option value="INR">INR - Indian rupee</option>
+            <option value="USD">USD - US dollar</option>
+            <option value="EUR">EUR - Euro</option>
+            <option value="GBP">GBP - British pound</option>
+            <option value="JPY">JPY - Japanese yen</option>
+          </select>
+        </label>
+        <button class="b" data-a="bk" id="bkb">Backup</button
         ><button class="b" data-a="out">Log out</button>
       </header>
       <nav id="nv"></nav>

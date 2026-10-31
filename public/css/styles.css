@@ -137,6 +137,28 @@ header #who {
     padding-right: 6px
 }
 
+header .currency-picker {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #a9b8c9;
+    font-size: 12px
+}
+
+header .currency-picker select {
+    max-width: 190px;
+    padding: 6px 8px;
+    border: 1px solid rgba(255, 255, 255, .2);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, .08);
+    color: #e8eef4;
+    font: inherit
+}
+
+header .currency-picker option {
+    color: #12202f
+}
+
 header .b {
     background: rgba(255, 255, 255, .07);
     border-color: rgba(255, 255, 255, .16);

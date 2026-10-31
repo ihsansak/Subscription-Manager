@@ -107,7 +107,12 @@ function pform(inv) {
           t: "select",
           o: ["Bank transfer", "UPI", "Card", "Cash", "Cheque"],
         },
-        num("amount", "Amount", inv ? owed(by("invoices", inv)) : 0),
+        num(
+          "amount",
+          `Amount (${CURRENCY})`,
+          inv ? owed(by("invoices", inv)) : 0,
+          true,
+        ),
         { k: "date", l: "Date", t: "date", d: today() },
         { k: "note", l: "Note", t: "textarea" },
       ],
@@ -115,9 +120,10 @@ function pform(inv) {
     ),
     async (d) => {
       const i = by("invoices", d.invoiceId),
-        a = +d.amount;
+        a = +d.amount,
+        amountInr = inBaseCurrency(a);
       if (!(a > 0)) return fail("Enter an amount above zero.");
-      if (a > owed(i) + 0.005)
+      if (amountInr > owed(i) + 0.005)
         return fail(
           "That is more than the outstanding " + money(owed(i)) + ".",
         );
@@ -126,7 +132,7 @@ function pform(inv) {
         body: JSON.stringify({
           invoiceId: i.id,
           method: d.method,
-          amount: a,
+          amount: amountInr,
           date: d.date,
           note: d.note,
         }),

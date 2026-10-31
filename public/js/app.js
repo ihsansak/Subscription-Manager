@@ -59,6 +59,34 @@ function render() {
     .join("");
   $("#who").textContent = `${ME.name} (${ME.role})`;
   $("#bkb").style.display = ME.role == "admin" ? "" : "none";
+  const currency = $("#currency");
+  currency.value = CURRENCY;
+  currency.title = DB.currency?.updatedAt
+    ? `Exchange rate from INR, dated ${DB.currency.updatedAt}${DB.currency.stale ? " (using cached rate)" : ""}`
+    : "Base currency";
+  currency.onchange = async () => {
+    const previous = CURRENCY;
+    currency.disabled = true;
+    try {
+      const { currency: preference } = await api("/currency", {
+        method: "PUT",
+        body: JSON.stringify({ currency: currency.value }),
+      });
+      CURRENCY = preference.code;
+      FX_RATE = preference.rate;
+      DB.currency = preference;
+      render();
+      toast(
+        preference.code == "INR"
+          ? "Currency changed to INR."
+          : `Currency changed to ${preference.code}; rate dated ${preference.updatedAt}${preference.stale ? " (cached rate)" : ""}.`,
+      );
+    } catch (error) {
+      currency.value = previous;
+      currency.disabled = false;
+      toast(error.message);
+    }
+  };
   (V[VIEW] || V.dashboard)();
 }
 A.go = async (v) => {

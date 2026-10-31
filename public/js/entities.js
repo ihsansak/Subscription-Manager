@@ -3,6 +3,8 @@ const cOpts = () =>
   DB.customers.filter((c) => !c.archived).map((c) => [c.id, c.name]);
 const plOpts = () =>
   DB.plans.filter((c) => !c.archived).map((c) => [c.id, c.name]);
+const usesCurrency = (field, record) =>
+  field.cur && (!field.curWhen || field.curWhen(record));
 const E = {
   customers: {
     t: "Customers",
@@ -38,11 +40,11 @@ const E = {
         t: "select",
         o: ["Software", "Add-on", "Service", "Hardware"],
       },
-      num("sales", "Sales price", 0),
-      num("cost", "Cost price", 0),
+      num("sales", `Sales price (${CURRENCY})`, 0, true),
+      num("cost", `Cost price (${CURRENCY})`, 0, true),
       {
         k: "vt",
-        l: "Variants, one per line as name:extra price (e.g. Odoo:560)",
+        l: `Variants, one per line as name:extra price in ${CURRENCY} (e.g. Odoo:560)`,
         t: "textarea",
       },
       { k: "notes", l: "Notes", t: "textarea" },
@@ -53,11 +55,13 @@ const E = {
       r.type,
       money(r.sales),
       money(r.cost),
-      (r.variants || []).map((v) => `${v.name} +${v.extra}`).join(", ") || "-",
+      (r.variants || []).map((v) => `${v.name} +${money(v.extra)}`).join(", ") || "-",
     ],
     in: (r) => ({
       ...r,
-      vt: (r.variants || []).map((v) => v.name + ":" + v.extra).join("\n"),
+      vt: (r.variants || [])
+        .map((v) => v.name + ":" + inCurrency(v.extra))
+        .join("\n"),
     }),
     out: (d) => {
       d.variants = (d.vt || "")
@@ -66,7 +70,7 @@ const E = {
         .filter(Boolean)
         .map((x) => {
           const [a, b] = x.split(":");
-          return { name: a.trim(), extra: +b || 0 };
+          return { name: a.trim(), extra: inBaseCurrency(+b || 0) };
         });
       delete d.vt;
     },
@@ -77,7 +81,7 @@ const E = {
     w: ["admin"],
     f: [
       { k: "name", l: "Plan name", r: 1 },
-      num("price", "Plan price", 0),
+      num("price", `Plan price (${CURRENCY})`, 0, true),
       {
         k: "freq",
         l: "Billing frequency",
@@ -164,8 +168,11 @@ const E = {
           ["fixed", "Fixed amount"],
         ],
       },
-      num("value", "Value", 0),
-      num("minAmount", "Minimum purchase amount", 0),
+      {
+        ...num("value", `Value (${CURRENCY} for fixed discount)`, 0),
+        curWhen: (record) => record.type == "fixed",
+      },
+      num("minAmount", `Minimum purchase amount (${CURRENCY})`, 0, true),
       num("minQty", "Minimum quantity", 0),
       { k: "from", l: "Valid from", t: "date" },
       { k: "to", l: "Valid until", t: "date" },
@@ -206,7 +213,8 @@ const E = {
 const fields = (f, r) =>
   f
     .map((x) => {
-      const v = r[x.k] ?? x.d ?? "";
+      const baseValue = r[x.k] ?? x.d ?? "";
+      const v = usesCurrency(x, r) ? inCurrency(baseValue) : baseValue;
       let i;
       if (x.t == "select") {
         const o = typeof x.o == "function" ? x.o() : x.o;
@@ -261,10 +269,10 @@ function lineRow(l) {
     (p.variants || [])
       .map(
         (v) =>
-          `<option value="${esc(v.name)}"${v.name == l.variant ? " selected" : ""}>${esc(v.name)} (+${v.extra})</option>`,
+          `<option value="${esc(v.name)}"${v.name == l.variant ? " selected" : ""}>${esc(v.name)} (+${money(v.extra)})</option>`,
       )
       .join("");
-  return `<div class="lr"><select class="p">${ps.map((x) => `<option value="${x.id}"${x.id == p.id ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select><select class="v">${vs}</select><input class="q" type="number" min="1" value="${l.qty || 1}"><input class="u" type="number" step="any" value="${l.price ?? p.sales}"><select class="t">${DB.taxes
+  return `<div class="lr"><select class="p">${ps.map((x) => `<option value="${x.id}"${x.id == p.id ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select><select class="v">${vs}</select><input class="q" type="number" min="1" value="${l.qty || 1}"><input class="u" type="number" step="any" aria-label="Unit price in ${CURRENCY}" title="Unit price in ${CURRENCY}" value="${inCurrency(l.price ?? p.sales)}"><select class="t">${DB.taxes
     .filter((t) => !t.archived)
     .map(
       (t) =>
@@ -285,7 +293,7 @@ const readLines = () =>
       variant: v,
       name: p.name + (v ? ` (${v})` : ""),
       qty: +r.querySelector(".q").value || 1,
-      price: +r.querySelector(".u").value || 0,
+      price: inBaseCurrency(+r.querySelector(".u").value || 0),
       taxId: r.querySelector(".t").value,
     };
   });
@@ -299,14 +307,14 @@ document.addEventListener("change", (e) => {
       (p.variants || [])
         .map(
           (v) =>
-            `<option value="${esc(v.name)}">${esc(v.name)} (+${v.extra})</option>`,
+            `<option value="${esc(v.name)}">${esc(v.name)} (+${money(v.extra)})</option>`,
         )
         .join("");
-    r.querySelector(".u").value = p.sales;
+    r.querySelector(".u").value = inCurrency(p.sales);
   }
   if (e.target.classList.contains("v")) {
     const v = (p.variants || []).find((x) => x.name == e.target.value);
-    r.querySelector(".u").value = p.sales + (v ? v.extra : 0);
+    r.querySelector(".u").value = inCurrency(p.sales + (v ? v.extra : 0));
   }
 });
 function eform(ent, id) {
@@ -318,7 +326,10 @@ function eform(ent, id) {
     fields(e.f, rr) + (e.lines ? linesBox(r.lines || []) : ""),
     async (d) => {
       e.f.forEach((f) => {
-        if (f.t == "number") d[f.k] = +d[f.k] || 0;
+        if (f.t == "number") {
+          d[f.k] = +d[f.k] || 0;
+          if (usesCurrency(f, d)) d[f.k] = inBaseCurrency(d[f.k]);
+        }
       });
       if (e.lines) {
         d.lines = readLines();

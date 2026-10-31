@@ -5,7 +5,9 @@ let DB = {},
   FL = {},
   DRAW = null,
   C = {},
-  TM = null;
+  TM = null,
+  CURRENCY = "INR",
+  FX_RATE = 1;
 const $ = (s) => document.querySelector(s);
 const sum = (a, f) => a.reduce((x, y) => x + (+f(y) || 0), 0),
   r2 = (n) => Math.round(n * 100) / 100,
@@ -32,12 +34,15 @@ const addM = (s, n) => {
   d.setUTCDate(Math.min(k, l));
   return d.toISOString().slice(0, 10);
 };
+const inCurrency = (n) => (+n || 0) * FX_RATE;
+const inBaseCurrency = (n) => (+n || 0) / FX_RATE;
 const money = (n) =>
-  "₹" +
-  (+n || 0).toLocaleString("en-IN", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+  new Intl.NumberFormat(
+    { INR: "en-IN", USD: "en-US", EUR: "de-DE", GBP: "en-GB", JPY: "ja-JP" }[
+      CURRENCY
+    ],
+    { style: "currency", currency: CURRENCY },
+  ).format(inCurrency(n));
 const by = (c, id) => {
   if (!C[c]) C[c] = new Map((DB[c] || []).map((x) => [x.id, x]));
   return C[c].get(id);
@@ -67,6 +72,8 @@ async function api(path, options = {}) {
 }
 async function reloadData() {
   DB = await api("/bootstrap");
+  CURRENCY = DB.currency?.code || "INR";
+  FX_RATE = DB.currency?.rate || 1;
   C = {};
   return DB;
 }
@@ -110,4 +117,4 @@ async function log(e) {
 addEventListener("error", (e) => {
   void log(e.message);
 });
-const num = (k, l, d) => ({ k, l, t: "number", d });
+const num = (k, l, d, cur = false) => ({ k, l, t: "number", d, cur });

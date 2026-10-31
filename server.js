@@ -3,6 +3,7 @@ const express=require('express'),path=require('path'),fs=require('fs'),crypto=re
 const D=require('./db'),BL=require('./shared/pricing'),{runBilling}=require('./billing'),{sendOtp}=require('./mailer');
 require('./seed')();
 const PROD=process.env.NODE_ENV==='production',PORT=+process.env.PORT||3000,DAY=864e5;
+const CURRENCIES=['INR','USD','EUR','GBP','JPY'],FX_MAX_AGE=6*36e5;
 const today=()=>new Date().toISOString().slice(0,10);
 class HE extends Error{constructor(s,m){super(m);this.s=s}}
 const bad=m=>new HE(400,m),nf=m=>new HE(404,m||'Not found.');
@@ -39,6 +40,23 @@ function consumeOtp(email,purpose,code){
  D.db.prepare('DELETE FROM auth_otps WHERE email=? AND purpose=?').run(email,purpose);
  return r;
 }
+async function currencyRate(currency){
+ if(currency=='INR')return{rate:1,updatedAt:null,stale:false};
+ const cached=D.db.prepare('SELECT rate,updated_at updatedAt,rate_date rateDate FROM currency_rates WHERE currency=?').get(currency);
+ if(cached&&Date.now()-cached.updatedAt<FX_MAX_AGE)return{rate:cached.rate,updatedAt:cached.rateDate,stale:false};
+ try{
+  const response=await fetch(`https://api.frankfurter.app/latest?from=INR&to=${currency}`,{signal:AbortSignal.timeout(7000)});
+  if(!response.ok)throw new Error(`Exchange-rate service returned ${response.status}.`);
+  const result=await response.json(),rate=+result.rates?.[currency],rateDate=String(result.date||'');
+  if(!(rate>0)||!isDate(rateDate))throw new Error('Exchange-rate service returned an invalid rate.');
+  D.db.prepare('INSERT INTO currency_rates(currency,rate,updated_at,rate_date) VALUES(?,?,?,?) ON CONFLICT(currency) DO UPDATE SET rate=excluded.rate,updated_at=excluded.updated_at,rate_date=excluded.rate_date').run(currency,rate,Date.now(),rateDate);
+  return{rate,updatedAt:rateDate,stale:false};
+ }catch(error){
+  if(cached)return{rate:cached.rate,updatedAt:cached.rateDate,stale:true};
+  D.log(`Exchange rate unavailable for ${currency}: ${error.message}`);
+  throw new HE(503,'Exchange rates are unavailable right now. Please try again later.');
+ }
+}
 const api=express.Router();app.use('/api',api);
 /* ---- accounts ---- */
 api.post('/login',wrap((q,s)=>{limit(q);const u=D.db.prepare('SELECT * FROM users WHERE email=?').get(str(q.body.email).toLowerCase());
@@ -61,7 +79,8 @@ api.post('/log',wrap(q=>{D.log('client: '+str(q.body.msg,300));return{ok:1}}));
 api.get('/me',auth,wrap(q=>({user:pub(q.user)})));
 api.post('/logout',auth,wrap((q,s)=>{D.db.prepare('DELETE FROM sessions WHERE token=?').run(q.tok);s.setHeader('Set-Cookie','sid=; Path=/; Max-Age=0');return{ok:1}}));
 /* ---- data for the signed-in role ---- */
-api.get('/bootstrap',auth,wrap(q=>{const u=q.user,cu=u.role=='customer',o={};
+api.get('/bootstrap',auth,wrap(async q=>{const u=q.user,cu=u.role=='customer',o={},setting=D.db.prepare('SELECT currency FROM user_settings WHERE uid=?').get(u.id),currency=CURRENCIES.includes(setting?.currency)?setting.currency:'INR';
+ const quote=await currencyRate(currency);o.currency={code:currency,...quote};
  for(const c of ['products','plans','taxes','discounts'])o[c]=D.all(c);
  if(!cu){o.templates=D.all('templates');o.customers=D.all('customers').map(({paymentMethod,...c})=>c);o.subscriptions=[];o.subscriptionSummary=subscriptionSummary();o.subscriptionEvents=D.db.prepare('SELECT id,subscription_id subscriptionId,type,occurred_at occurredAt,actor_id actorId,details FROM subscription_events ORDER BY id').all().map(e=>({...e,details:JSON.parse(e.details)}));o.invoices=D.all('invoices');o.payments=D.all('payments');
   o.users=u.role=='admin'?D.db.prepare("SELECT id,name,email,role FROM users WHERE role='staff'").all():[]}
@@ -69,6 +88,10 @@ api.get('/bootstrap',auth,wrap(q=>{const u=q.user,cu=u.role=='customer',o={};
   o.invoices=D.all('invoices',w+" AND json_extract(data,'$.status')!='Draft'",u.cid);o.payments=D.all('payments',"json_extract(data,'$.invoiceId') IN (SELECT id FROM invoices WHERE "+w+")",u.cid)}
  const sums={};D.db.prepare("SELECT json_extract(data,'$.invoiceId') k,SUM(json_extract(data,'$.amount')) s FROM payments GROUP BY k").all().forEach(r=>sums[r.k]=r.s);
  o.invoices.forEach(i=>i.paid=BL.r2(sums[i.id]||0));return o}));
+api.put('/currency',auth,wrap(async q=>{const currency=str(q.body.currency,3).toUpperCase();if(!CURRENCIES.includes(currency))throw bad('Choose a supported currency.');
+ const quote=await currencyRate(currency);
+ D.db.prepare("INSERT INTO user_settings(uid,currency) VALUES(?,?) ON CONFLICT(uid) DO UPDATE SET currency=excluded.currency").run(q.user.id,currency);
+ return{currency:{code:currency,...quote}}}));
 function subscriptionScope(cid){return cid?{sql:"json_extract(s.data,'$.customerId')=? AND COALESCE(json_extract(s.data,'$.archived'),0)=0",params:[cid]}:{sql:"COALESCE(json_extract(s.data,'$.archived'),0)=0",params:[]}}
 function subscriptionSummary(cid){const scope=subscriptionScope(cid),rows=D.db.prepare(`SELECT json_extract(s.data,'$.status') status,COUNT(*) count FROM subscriptions s WHERE ${scope.sql} GROUP BY json_extract(s.data,'$.status')`).all(...scope.params),byStatus={};rows.forEach(r=>byStatus[r.status]=r.count);return{total:rows.reduce((n,r)=>n+r.count,0),byStatus}}
 api.get('/subscriptions',auth,wrap(q=>{const scope=subscriptionScope(q.user.role=='customer'?q.user.cid:null),page=Math.max(1,Math.min(100000,+q.query.page||1)),pageSize=Math.max(1,Math.min(100,+q.query.pageSize||25)),status=str(q.query.status,20),search=str(q.query.q,100),from=str(q.query.from,10),to=str(q.query.to,10),sort=str(q.query.sort,20)||'next',order=q.query.order=='desc'?'DESC':'ASC';
