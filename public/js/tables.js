@@ -2,8 +2,17 @@
 const cell = (c) => (c && c.raw !== undefined ? c.raw : esc(c));
 const plain = (c) =>
   c && c.raw !== undefined ? c.raw.replace(/<[^>]*>/g, "") : String(c);
+let CSV_EXPORT = null;
+const csvCell = (value) => {
+  let text = String(value ?? "").replace(/\r?\n|\r/g, " ");
+  if (/^[=+\-@]/.test(text)) text = "'" + text;
+  return `"${text.replace(/"/g, '""')}"`;
+};
+const csvFilename = (title) =>
+  `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "export"}-${today()}.csv`;
 function page(title, tools, get, heads, filters = "") {
-  M.innerHTML = `<div class="bar"><h2>${title}</h2><span class="sp"></span>${filters}<input id="q" placeholder="Search" value="${esc(Q)}" aria-label="Search">${tools}</div><div id="tb" class="card"></div>`;
+  CSV_EXPORT = { title, get, heads };
+  M.innerHTML = `<div class="bar"><h2>${title}</h2><span class="sp"></span>${filters}<input id="q" placeholder="Search" value="${esc(Q)}" aria-label="Search"><button class="b" data-a="csv">Export CSV</button>${tools}</div><div id="tb" class="card"></div>`;
   const draw = (DRAW = () => {
     const q = Q.toLowerCase(),
       all = get().filter(
@@ -33,6 +42,31 @@ function page(title, tools, get, heads, filters = "") {
   });
   draw();
 }
+const exportCsv = () => {
+  if (!CSV_EXPORT) return toast("There is no table to export.");
+  if (!window.Blob || !window.URL?.createObjectURL) {
+    return toast("CSV export is not supported by this browser.");
+  }
+  const { title, get, heads } = CSV_EXPORT,
+    q = Q.toLowerCase(),
+    rows = get()
+      .filter(
+        (r) => !q || r.map(plain).join(" ").toLowerCase().includes(q),
+      )
+      .map((r) => r.slice(0, heads.length)),
+    csv = [heads, ...rows]
+      .map((r) => r.map((c) => csvCell(plain(c))).join(","))
+      .join("\r\n"),
+    url = URL.createObjectURL(
+      new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }),
+    ),
+    link = document.createElement("a");
+  link.href = url;
+  link.download = csvFilename(title);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  toast(`${rows.length} row${rows.length == 1 ? "" : "s"} exported.`);
+};
 const can = (ent) => E[ent].w.includes(ME.role);
 function listEnt(ent) {
   const e = E[ent],
@@ -150,6 +184,7 @@ const SB = (s, w) => {
   } else if (s.status == "Active" && !s.request) {
     if (p.allowRenew == "yes")
       b += `<button class="b" data-a="req" data-id="${s.id}" data-x="Renewal">Request renewal</button>`;
+    b += `<button class="b" data-a="planchange" data-id="${s.id}">Change plan</button>`;
     b += `<button class="b dn" data-a="req" data-id="${s.id}" data-x="Cancellation">Request cancellation</button>`;
   }
   return `<button class="b" data-a="sview" data-id="${s.id}">View</button>` + b;
@@ -161,7 +196,7 @@ V.subscriptions = () => {
     myC() ? "My subscriptions" : "Subscriptions",
     w
       ? `<button class="b pr" data-a="snew">+ New</button><button class="b" data-a="bill">Run billing now</button>`
-      : "",
+      : `<button class="b pr" data-a="paymentmethods">Manage payment methods</button>`,
     () =>
       subsV()
         .filter((s) => !FL.ss || s.status == FL.ss)
@@ -192,6 +227,7 @@ V.subscriptions = () => {
   );
 };
 const A = {};
+A.csv = exportCsv;
 A.close = closeM;
 A.new = (_, e) => (e == "users" ? staffForm() : eform(e));
 A.edit = (i, e) => eform(e, i);
@@ -253,6 +289,27 @@ A.req = (id, _, __, x) => {
   render();
   toast(x + " request sent to the team.");
 };
+
+// Customer self-service: plan changes are requests for staff review; no surprise billing.
+A.planchange = (id) => {
+  const s = by("subscriptions", id);
+  if (!s || s.customerId !== ME.cid || s.status !== "Active") return toast("This subscription cannot be changed.");
+  const options = DB.plans.filter(p => !p.archived && p.id !== s.planId);
+  if (!options.length) return toast("No other plans are available.");
+  fmodal("Request a plan change", `<p class="mu">Choose a plan. Your current subscription remains unchanged until the team reviews the request.</p><label>New plan<select name="planId" required>${options.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money(p.price)}/${esc(p.freq)}</option>`).join("")}</select></label><label>Notes<textarea name="note" rows="2" maxlength="300" placeholder="Optional details"></textarea></label>`, d => {
+    s.changeRequest = {fromPlanId:s.planId,toPlanId:d.planId,note:d.note||"",requestedAt:today(),status:"Pending"};
+    save(); toast("Plan change request submitted.");
+  }, "Submit request");
+};
+
+// Demo payment-method vault stores only display metadata, never card number or CVV.
+A.paymentmethods = () => {
+  const c = by("customers", ME.cid) || {};
+  const pm = c.paymentMethod || {};
+  modal(`<h3>Payment methods</h3><p class="mu">Demo mode: this saves payment-method details for display only. Do not enter a real card number or CVV. A payment provider must be connected for secure, real payments.</p><p>${pm.brand ? `${esc(pm.brand)} ending in ${esc(pm.last4)} · expires ${esc(pm.expiry||"-")}` : "No payment method saved."}</p><form id="pmf"><label>Card brand<select name="brand"><option>Visa</option><option>Mastercard</option><option>American Express</option><option>Other</option></select></label><label>Last four digits<input name="last4" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required value="${esc(pm.last4||"")}"></label><label>Expiry (MM/YY)<input name="expiry" placeholder="MM/YY" pattern="(0[1-9]|1[0-2])/[0-9]{2}" value="${esc(pm.expiry||"")}" required></label><div class="bar"><button type="button" class="b" data-a="close">Cancel</button>${pm.brand?'<button type="button" class="b dn" data-a="paymentremove">Remove</button>':''}<span class="sp"></span><button class="b pr">Save</button></div></form>`);
+  $("#pmf").onsubmit = e => { e.preventDefault(); const d=Object.fromEntries(new FormData(e.currentTarget)); if(!/^\d{4}$/.test(d.last4)||! /^(0[1-9]|1[0-2])\/\d{2}$/.test(d.expiry)) return toast("Enter a valid last-four and expiry."); c.paymentMethod={brand:d.brand,last4:d.last4,expiry:d.expiry}; save(); closeM(); render(); toast("Payment method saved (demo metadata only)."); };
+};
+A.paymentremove = () => { const c=by("customers",ME.cid); if(c) delete c.paymentMethod; save(); closeM(); render(); toast("Saved payment method removed."); };
 A.bill = () => {
   const n = runBilling();
   render();
