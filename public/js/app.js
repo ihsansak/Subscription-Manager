@@ -121,7 +121,7 @@ async function enter(u) {
   render();
 }
 /* ---------- auth ---------- */
-function auth(mode, msg = "") {
+function auth(mode, msg = "", email = "") {
   $("#app").style.display = "none";
   const a = $("#au");
   a.style.display = "block";
@@ -136,12 +136,10 @@ function auth(mode, msg = "") {
       ["pw", "Password", "password"],
     ],
     verify: [
-      ["email", "Email", "email"],
       ["tok", "Verification code", "text"],
     ],
     forgot: [["email", "Registered email", "email"]],
     reset: [
-      ["email", "Email", "email"],
       ["tok", "Reset code from email", "text"],
       ["pw", "New password", "password"],
     ],
@@ -173,11 +171,12 @@ function auth(mode, msg = "") {
         auth(
           "verify",
           '<p class="mu">We sent a verification code to your email. It expires in 10 minutes.</p>',
+          d.email,
         );
       } else if (mode == "verify") {
         const { user } = await api("/verify-registration", {
           method: "POST",
-          body: JSON.stringify({ email: d.email, tok: d.tok }),
+          body: JSON.stringify({ email, tok: d.tok }),
         });
         await enter(user);
       } else if (mode == "forgot") {
@@ -188,12 +187,13 @@ function auth(mode, msg = "") {
         auth(
           "reset",
           `<p class="mu">${esc(result.message || "If that email is registered, a verification code has been sent.")}</p>`,
+          d.email,
         );
       } else if (mode == "reset") {
         await api("/reset", {
           method: "POST",
           body: JSON.stringify({
-            email: d.email,
+            email,
             tok: d.tok,
             pw: d.pw,
           }),
