@@ -174,10 +174,12 @@ A.cview = (id) => {
 /* ---------- dashboard ---------- */
 const kp = (a) =>
   `<div class="cards">${a.map(([l, v, meta = ""]) => `<div class="kp"><span>${l}</span><b>${v}</b>${meta ? `<small>${meta}</small>` : ""}</div>`).join("")}</div>`;
-V.dashboard = () => {
+V.dashboard = async () => {
   DRAW = null;
   if (myC()) {
-    const ss = subsV(),
+    const dashboardSubscriptions = await loadSubscriptions({ pageSize: 6, sort: "next", status: "Active" });
+    const ss = dashboardSubscriptions.rows,
+      activeCount = dashboardSubscriptions.summary.byStatus.Active || 0,
       ii = invV(),
       act = ss.filter((s) => s.status == "Active"),
       nx = act
@@ -189,7 +191,7 @@ V.dashboard = () => {
     M.innerHTML =
       `<div class="dash-hero"><div><span class="eyebrow">CUSTOMER PORTAL</span><h2>Welcome back, ${esc(ME.name)}</h2><p class="mu">Here is the latest view of your Brightloop account.</p></div><div class="dash-actions"><button class="b pr" data-a="profile">Manage profile</button><button class="b" data-a="go" data-id="subscriptions">Subscriptions</button></div></div>` +
       kp([
-        ["Active subscriptions", act.length, act.length ? "Currently running" : "No active plans"],
+        ["Active subscriptions", activeCount, activeCount ? "Currently running" : "No active plans"],
         ["Next billing date", nx || "-", nx ? "Upcoming charge" : "Nothing scheduled"],
         ["Outstanding balance", money(outstanding), outstanding ? "Payment required" : "All caught up"],
         ["Overdue invoices", overdue.length, overdue.length ? "Needs attention" : "No overdue invoices"],
@@ -198,15 +200,16 @@ V.dashboard = () => {
     return;
   }
   const f = FL,
+    filteredSubscriptions = await loadSubscriptions({ pageSize: 6, sort: "next", status: f.ds, from: f.df, to: f.dt }),
     inR = (d) => (!f.df || d >= f.df) && (!f.dt || d <= f.dt),
-    subs = DB.subscriptions.filter(
-      (s) => (!f.ds || s.status == f.ds) && inR(s.start),
-    ),
+    subs = filteredSubscriptions.rows,
     inv = DB.invoices.filter((i) => inR(i.issue)),
     bill = inv.filter((i) => ["Confirmed", "Paid"].includes(i.status)),
     od = bill.filter((i) => istat(i) == "Overdue"),
     sts = ["Draft", "Quotation", "Confirmed", "Active", "Closed"];
   const active = subs.filter((s) => s.status == "Active"),
+    subscriptionCount = filteredSubscriptions.summary.total,
+    activeCount = filteredSubscriptions.summary.byStatus.Active || 0,
     collected = sum(DB.payments.filter((p) => inR(p.date)), (p) => p.amount),
     outstanding = sum(bill.filter((i) => i.status == "Confirmed"), owed),
     upcoming = active.filter((s) => s.next).sort((a, b) => a.next.localeCompare(b.next)).slice(0, 6),
@@ -214,14 +217,14 @@ V.dashboard = () => {
   M.innerHTML =
     `<div class="dash-hero"><div><span class="eyebrow">OPERATIONS OVERVIEW</span><h2>Good ${new Date().getHours() < 12 ? "morning" : new Date().getHours() < 18 ? "afternoon" : "evening"}, ${esc(ME.name)}</h2><p class="mu">Monitor subscriptions, cash flow, and accounts that need attention.</p></div><div class="dash-actions"><button class="b pr" data-a="bill">Run billing now</button><button class="b" data-a="go" data-id="invoices">Review invoices</button></div></div><div class="dash-filters"><span class="eyebrow">REPORTING PERIOD</span><label>From <input type="date" id="df" class="flt"></label><label>To <input type="date" id="dt" class="flt"></label><select id="ds" class="flt" aria-label="Subscription status"><option value="">All subscription statuses</option>${sts.map((x) => `<option>${x}</option>`).join("")}</select></div>` +
     kp([
-      ["Total subscriptions", subs.length, `${active.length} active now`],
-      ["Active subscriptions", active.length, active.length ? "Billing enabled" : "No active plans"],
+      ["Total subscriptions", subscriptionCount, `${activeCount} active now`],
+      ["Active subscriptions", activeCount, activeCount ? "Billing enabled" : "No active plans"],
       ["Total revenue", money(sum(bill, (i) => i.total)), `${bill.length} issued invoices`],
       ["Collected payments", money(collected), totalInvoiceValue ? `${Math.round((collected / totalInvoiceValue) * 100)}% of invoiced value` : "No payments in period"],
       ["Outstanding", money(outstanding), outstanding ? "Confirmed invoices" : "Nothing currently owed"],
       ["Overdue invoices", od.length, od.length ? "Follow-up required" : "No overdue accounts"],
     ]) +
-    `<div class="two dash-panels"><div class="card dash-panel"><div class="panel-head"><div><span class="eyebrow">SUBSCRIPTIONS</span><h3>Portfolio health</h3></div><button class="b" data-a="go" data-id="subscriptions">View all</button></div><div class="status-list">${sts.map((s) => { const count = subs.filter((x) => x.status == s).length, pct = subs.length ? (count / subs.length) * 100 : 0; return `<div class="status-row"><div><span>${s}</span><b>${count}</b></div><div class="bar-track"><i style="width:${pct}%"></i></div></div>`; }).join("")}</div></div>
+    `<div class="two dash-panels"><div class="card dash-panel"><div class="panel-head"><div><span class="eyebrow">SUBSCRIPTIONS</span><h3>Portfolio health</h3></div><button class="b" data-a="go" data-id="subscriptions">View all</button></div><div class="status-list">${sts.map((s) => { const count = filteredSubscriptions.summary.byStatus[s] || 0, pct = subscriptionCount ? (count / subscriptionCount) * 100 : 0; return `<div class="status-row"><div><span>${s}</span><b>${count}</b></div><div class="bar-track"><i style="width:${pct}%"></i></div></div>`; }).join("")}</div></div>
  <div class="card dash-panel"><div class="panel-head"><div><span class="eyebrow">INVOICES</span><h3>Billing health</h3></div><button class="b" data-a="go" data-id="invoices">View all</button></div><div class="tw"><table class="compact-table"><thead><tr><th>Status</th><th>Count</th><th>Amount</th></tr></thead><tbody>${[
    "Draft",
    "Confirmed",
@@ -230,7 +233,7 @@ V.dashboard = () => {
    "Cancelled",
  ]
    .map((s) => {
-     const x = inv.filter((i) => istat(i) == s);
+    const x = inv.filter((i) => istat(i) == s);
      return `<tr><td><span class="status-dot ${s.toLowerCase()}"></span>${s}</td><td>${x.length}</td><td>${money(sum(x, (i) => i.total))}</td></tr>`;
    })
    .join("")}</tbody></table></div></div></div>

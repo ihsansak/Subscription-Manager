@@ -27,6 +27,10 @@ CREATE TRIGGER IF NOT EXISTS subscription_events_no_delete
  BEGIN SELECT RAISE(ABORT,'Subscription events are immutable.'); END;
 CREATE INDEX IF NOT EXISTS ix_sub_c ON subscriptions(json_extract(data,'$.customerId'));
 CREATE INDEX IF NOT EXISTS ix_sub_s ON subscriptions(json_extract(data,'$.status'));
+CREATE INDEX IF NOT EXISTS ix_sub_start ON subscriptions(json_extract(data,'$.start'));
+CREATE INDEX IF NOT EXISTS ix_sub_expiry ON subscriptions(json_extract(data,'$.expiry'));
+CREATE INDEX IF NOT EXISTS ix_sub_next ON subscriptions(json_extract(data,'$.next'));
+CREATE INDEX IF NOT EXISTS ix_sub_status_next ON subscriptions(json_extract(data,'$.status'),json_extract(data,'$.next'));
 CREATE INDEX IF NOT EXISTS ix_inv_c ON invoices(json_extract(data,'$.customerId'));
 CREATE INDEX IF NOT EXISTS ix_inv_s ON invoices(json_extract(data,'$.status'));
 CREATE UNIQUE INDEX IF NOT EXISTS ux_inv_key ON invoices(json_extract(data,'$.key'));

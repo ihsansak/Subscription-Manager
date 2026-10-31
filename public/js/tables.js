@@ -193,44 +193,27 @@ const SB = (s, w) => {
   }
   return `<button class="b" data-a="sview" data-id="${s.id}">View</button>` + b;
 };
-V.subscriptions = () => {
+let SUB_PAGE = 1;
+V.subscriptions = async () => {
   const w = staff(),
-    sts = ["Draft", "Quotation", "Confirmed", "Active", "Closed"];
-  page(
-    myC() ? "My subscriptions" : "Subscriptions",
-    w
-      ? `<button class="b pr" data-a="snew">+ New</button><button class="b" data-a="bill">Run billing now</button>`
-      : `<button class="b pr" data-a="paymentmethods">Manage payment methods</button>`,
-    () =>
-      subsV()
-        .filter((s) => !FL.ss || s.status == FL.ss)
-        .map((s) => [
-          s.number,
-          nm("customers", s.customerId),
-          nm("plans", s.planId),
-          s.start,
-          s.expiry,
-          s.next || "-",
-          raw(
-            `${badge(s.status).raw}${s.paused ? badge("Paused").raw : ""}${s.request ? ` <span class="mu">${s.request} requested</span>` : ""}`,
-          ),
-          money(calc(s.lines).total),
-          raw(SB(s, w)),
-        ]),
-    [
-      "No.",
-      "Customer",
-      "Plan",
-      "Start",
-      "Expiry",
-      "Next billing",
-      "Status",
-      "Est. total",
-    ],
-    `<select id="ss" class="flt" aria-label="Status"><option value="">All statuses</option>${sts.map((x) => `<option>${x}</option>`).join("")}</select>`,
-  );
+    sts = ["Draft", "Quotation", "Confirmed", "Active", "Closed"],
+    heads = ["No.", "Customer", "Plan", "Start", "Expiry", "Next billing", "Status", "Est. total"],
+    title = myC() ? "My subscriptions" : "Subscriptions";
+  M.innerHTML = `<div class="bar"><h2>${title}</h2><span class="sp"></span><select id="ss" class="flt" aria-label="Status"><option value="">All statuses</option>${sts.map((x) => `<option>${x}</option>`).join("")}</select><select id="so" class="flt" aria-label="Sort by"><option value="next">Next billing</option><option value="start">Start date</option><option value="expiry">Expiry date</option><option value="customer">Customer</option><option value="plan">Plan</option><option value="status">Status</option><option value="number">Number</option></select><select id="sd" class="flt" aria-label="Sort direction"><option value="asc">Ascending</option><option value="desc">Descending</option></select><input id="q" placeholder="Search" value="${esc(Q)}" aria-label="Search">${w ? `<button class="b pr" data-a="snew">+ New</button><button class="b" data-a="bill">Run billing now</button>` : `<button class="b pr" data-a="paymentmethods">Manage payment methods</button>`}</div><div id="tb" class="card"></div>`;
+  const draw = async () => {
+    const result = await loadSubscriptions({ page: SUB_PAGE, pageSize: 25, q: Q, status: FL.ss, sort: FL.so || "next", order: FL.sd || "asc" });
+    const rows = result.rows.map((s) => [s.number, nm("customers", s.customerId), nm("plans", s.planId), s.start, s.expiry, s.next || "-", raw(`${badge(s.status).raw}${s.paused ? badge("Paused").raw : ""}${s.request ? ` <span class="mu">${s.request} requested</span>` : ""}`), money(calc(s.lines).total), raw(SB(s, w))]);
+    const totalPages = Math.max(1, Math.ceil(result.summary.total / result.pageSize));
+    $("#tb").innerHTML = rows.length ? `<div class="tw"><table><thead><tr>${heads.map((h) => `<th>${h}</th>`).join("")}<th></th></tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${cell(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div><div class="bar"><span class="mu">${result.summary.total} subscription${result.summary.total == 1 ? "" : "s"} · page ${SUB_PAGE} of ${totalPages}</span><span class="sp"></span><button class="b" data-a="spage" data-id="prev" ${SUB_PAGE == 1 ? "disabled" : ""}>Previous</button><button class="b" data-a="spage" data-id="next" ${SUB_PAGE >= totalPages ? "disabled" : ""}>Next</button></div>` : `<p class="mu" style="padding:14px">Nothing here yet.</p>`;
+  };
+  $("#q").oninput = (e) => { Q = e.target.value; SUB_PAGE = 1; void draw(); };
+  $("#ss").value = FL.ss || "";
+  $("#ss").onchange = (e) => { FL.ss = e.target.value; SUB_PAGE = 1; void draw(); };
+  ["so", "sd"].forEach((id) => { $("#" + id).value = FL[id] || $("#" + id).value; $("#" + id).onchange = (e) => { FL[id] = e.target.value; SUB_PAGE = 1; void draw(); }; });
+  try { await draw(); } catch (error) { toast(error.message); }
 };
 const A = {};
+A.spage = async (direction) => { SUB_PAGE += direction == "next" ? 1 : -1; await V.subscriptions(); };
 A.csv = exportCsv;
 A.close = closeM;
 A.new = (_, e) => (e == "users" ? staffForm() : eform(e));

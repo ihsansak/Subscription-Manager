@@ -70,6 +70,17 @@ async function reloadData() {
   C = {};
   return DB;
 }
+async function loadSubscriptions(options = {}) {
+  const query = new URLSearchParams();
+  Object.entries(options).forEach(([key, value]) => {
+    if (value !== undefined && value !== "") query.set(key, value);
+  });
+  const result = await api(`/subscriptions?${query}`);
+  DB.subscriptions = result.rows;
+  DB.subscriptionSummary = result.summary;
+  C.subscriptions = new Map(result.rows.map((row) => [row.id, row]));
+  return result;
+}
 const toast = (m) => {
   const t = $("#toast");
   t.textContent = m;
