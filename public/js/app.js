@@ -75,6 +75,7 @@ function render() {
       CURRENCY = preference.code;
       FX_RATE = preference.rate;
       DB.currency = preference;
+      currency.disabled = false;
       render();
       toast(
         preference.code == "INR"
