@@ -179,7 +179,7 @@ function auth(mode, msg = "", email = "") {
     forgot: "Forgot password",
     reset: "Set a new password",
   };
-  a.innerHTML = `<h1 style="text-align:center;margin-bottom:14px">Bright<span style="color:var(--ac2)">loop</span></h1><div class="card"><h3>${T[mode]}</h3>${msg}<form id="af">${F[mode].map(([k, l, t]) => `<label>${l}<input name="${k}" type="${t}" required></label>`).join("")}<button class="b pr" style="width:100%;padding:8px;margin-top:6px">${T[mode]}</button></form>
+  a.innerHTML = `<h1 style="text-align:center;margin-bottom:14px">Bright<span style="color:var(--ac2)">loop</span></h1><div class="card"><h3>${T[mode]}</h3>${DEMO_MODE ? '<p class="pv">Demo mode is enabled. Verification codes appear here instead of being emailed.</p>' : ""}${msg}<form id="af">${F[mode].map(([k, l, t]) => `<label>${l}<input name="${k}" type="${t}" required></label>`).join("")}<button class="b pr" style="width:100%;padding:8px;margin-top:6px">${T[mode]}</button></form>
  <p class="hint">${mode == "login" ? '<a class="l" data-a="au" data-id="register">Create account</a> · <a class="l" data-a="au" data-id="forgot">Forgot password?</a>' : '<a class="l" data-a="au" data-id="login">Back to log in</a>'}</p>${mode == "login" ? '<p class="hint">Demo logins: admin@brightloop.com / Admin@1234 · staff@brightloop.com / Staff@1234 · acme@example.com / Acme@1234</p>' : ""}</div>`;
   $("#af").onsubmit = async (ev) => {
     ev.preventDefault();
@@ -192,13 +192,13 @@ function auth(mode, msg = "", email = "") {
         });
         await enter(user);
       } else if (mode == "register") {
-        await api("/register", {
+        const result = await api("/register", {
           method: "POST",
           body: JSON.stringify({ name: d.name, email: d.email, pw: d.pw }),
         });
         auth(
           "verify",
-          '<p class="mu">We sent a verification code to your email. It expires in 10 minutes.</p>',
+          `<p class="mu">${esc(result.message)} It expires in 10 minutes.</p>${result.demoCode ? `<p class="pv">Demo verification code: <b>${esc(result.demoCode)}</b></p>` : ""}`,
           d.email,
         );
       } else if (mode == "verify") {
@@ -214,7 +214,7 @@ function auth(mode, msg = "", email = "") {
         });
         auth(
           "reset",
-          `<p class="mu">${esc(result.message || "If that email is registered, a verification code has been sent.")}</p>`,
+          `<p class="mu">${esc(result.message || "If that email is registered, a verification code has been sent.")}</p>${result.demoCode ? `<p class="pv">Demo reset code: <b>${esc(result.demoCode)}</b></p>` : ""}`,
           d.email,
         );
       } else if (mode == "reset") {
@@ -248,6 +248,8 @@ function auth(mode, msg = "", email = "") {
 A.au = (m) => auth(m);
 (async () => {
   try {
+    const config = await api("/config");
+    DEMO_MODE = config.demoMode === true;
     const { user } = await api("/me");
     await enter(user);
   } catch (error) {

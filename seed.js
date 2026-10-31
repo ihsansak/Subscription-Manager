@@ -1,11 +1,12 @@
 const D=require('./db'),BL=require('./shared/pricing');
-module.exports=function seed(){
+module.exports=function seed(options={}){
  if(D.db.prepare('SELECT COUNT(*) n FROM users').get().n)return;
+ const demo=options.demo??/^(1|true|yes)$/i.test(process.env.SEED_DEMO||'');
  const ae=process.env.ADMIN_EMAIL||'admin@brightloop.com',ap=process.env.ADMIN_PASSWORD||'Admin@1234';
  if(!D.pwOk(ap))throw new Error('ADMIN_PASSWORD must have 9+ characters with upper, lower and a special character.');
+ const t=new Date().toISOString().slice(0,10),y=+t.slice(0,4),N={p1:'Brightloop CRM',p2:'Analytics Add-on',p3:'Priority Support'};
  D.tx(()=>{D.makeUser('Admin',ae,ap,'admin');
-  if(process.env.SEED_DEMO==='0')return;
-  const t=new Date().toISOString().slice(0,10),y=+t.slice(0,4),N={p1:'Brightloop CRM',p2:'Analytics Add-on',p3:'Priority Support'};
+  if(!demo)return;
   const L=(p,v,q,pr,tx)=>({productId:p,variant:v,name:N[p]+(v?` (${v})`:''),qty:q,price:pr,taxId:tx});
   D.makeUser('Sam Staff','staff@brightloop.com','Staff@1234','staff');D.makeUser('Acme Traders','acme@example.com','Acme@1234','customer','c1');
   [{id:'c1',name:'Acme Traders',email:'acme@example.com',phone:'9876500001',address:'12 Market Road, Kochi'},{id:'c2',name:'Northwind Retail',email:'accounts@northwind.test',phone:'9876500002',address:'4 Lake View, Bengaluru'}].forEach(x=>D.put('customers',x));
@@ -16,4 +17,8 @@ module.exports=function seed(){
   D.put('templates',{id:'tp1',name:'Starter bundle',planId:'pl1',validity:15,lines:[L('p1','Odoo',3,2560,'t1'),L('p2','',3,500,'t1')]});
   D.put('subscriptions',{id:'s1',number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),customerId:'c1',planId:'pl1',start:BL.addM(t,-2),expiry:BL.addM(t,10),terms:'Net 15',status:'Active',paused:false,next:BL.addM(t,-2),lines:[L('p1','Odoo',3,2560,'t1'),L('p2','',3,500,'t1')]});D.addSubEvent('s1','Created');D.addSubEvent('s1','Activated');
   D.put('subscriptions',{id:'s2',number:'SUB-'+String(D.seq('sub')).padStart(4,'0'),customerId:'c2',planId:'pl2',start:BL.addD(t,-5),expiry:BL.addM(t,12),terms:'Net 30',status:'Active',paused:false,next:BL.addD(t,-5),lines:[L('p1','',6,2000,'t1'),L('p3','',1,1000,'t2')]});D.addSubEvent('s2','Created');D.addSubEvent('s2','Activated')});
+  const taxes=D.all('taxes'),discounts=D.all('discounts'),s1=D.get('subscriptions','s1'),s2=D.get('subscriptions','s2'),c1=BL.calc(s1.lines,taxes,discounts,BL.addM(t,-1)),c2=BL.calc(s2.lines,taxes,discounts,t);
+  D.put('invoices',{id:'inv-demo-paid',number:'INV-'+String(D.seq('inv')).padStart(4,'0'),key:'demo|paid',subId:'s1',customerId:'c1',issue:BL.addM(t,-1),period:BL.addM(t,-1),due:t,lines:c1.lines,subtotal:c1.subtotal,discount:c1.discount,tax:c1.tax,total:c1.total,status:'Paid',sent:true});
+  D.put('payments',{id:'pay-demo-paid',invoiceId:'inv-demo-paid',method:'Bank transfer',amount:c1.total,date:BL.addD(t,-20),note:'Demo payment',by:null});
+  D.put('invoices',{id:'inv-demo-confirmed',number:'INV-'+String(D.seq('inv')).padStart(4,'0'),key:'demo|confirmed',subId:'s2',customerId:'c2',issue:BL.addD(t,-3),period:BL.addD(t,-3),due:BL.addD(t,12),lines:c2.lines,subtotal:c2.subtotal,discount:c2.discount,tax:c2.tax,total:c2.total,status:'Confirmed',sent:true});
  console.log('Database seeded. Admin login: '+ae+(process.env.ADMIN_PASSWORD?'':' / Admin@1234 (change this!)'))};

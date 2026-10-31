@@ -1,8 +1,9 @@
 require('dotenv').config();
 const express=require('express'),path=require('path'),fs=require('fs'),crypto=require('crypto');
 const D=require('./db'),BL=require('./shared/pricing'),{runBilling}=require('./billing'),{sendOtp}=require('./mailer');
-require('./seed')();
-const PROD=process.env.NODE_ENV==='production',PORT=+process.env.PORT||3000,DAY=864e5;
+const PROD=process.env.NODE_ENV==='production',DEMO_MODE=!PROD&&/^(1|true|yes)$/i.test(process.env.DEMO_MODE||'');
+require('./seed')({demo:DEMO_MODE});
+const PORT=+process.env.PORT||3000,DAY=864e5;
 const CURRENCIES=['INR','USD','EUR','GBP','JPY'],FX_MAX_AGE=6*36e5;
 const today=()=>new Date().toISOString().slice(0,10);
 class HE extends Error{constructor(s,m){super(m);this.s=s}}
@@ -29,6 +30,7 @@ const otpCode=()=>String(crypto.randomInt(0,1000000)).padStart(6,'0');
 async function issueOtp(email,purpose,payload=null){
  const code=otpCode();
  D.db.prepare('INSERT INTO auth_otps(email,purpose,code_hash,payload,exp,attempts) VALUES(?,?,?,?,?,0) ON CONFLICT(email,purpose) DO UPDATE SET code_hash=excluded.code_hash,payload=excluded.payload,exp=excluded.exp,attempts=0').run(email,purpose,sha(code),payload?JSON.stringify(payload):null,Date.now()+OTP_TTL);
+ if(DEMO_MODE)return code;
  try{await sendOtp(email,code,purpose)}catch(e){D.db.prepare('DELETE FROM auth_otps WHERE email=? AND purpose=?').run(email,purpose);D.log(`OTP email failed for ${purpose}: ${e.message}`);throw new HE(503,'We could not send the verification email. Please try again later.')}
 }
 function consumeOtp(email,purpose,code){
@@ -59,19 +61,20 @@ async function currencyRate(currency){
 }
 const api=express.Router();app.use('/api',api);
 /* ---- accounts ---- */
+api.get('/config',wrap(()=>({demoMode:DEMO_MODE})));
 api.post('/login',wrap((q,s)=>{limit(q);const u=D.db.prepare('SELECT * FROM users WHERE email=?').get(str(q.body.email).toLowerCase());
  if(!u||!eq(u.hash,D.hashPw(String(q.body.pw||''),u.salt)))throw new HE(401,'Email or password is incorrect.');tries.delete(q.ip);session(s,u);return{user:pub(u)}}));
 api.post('/register',wrap(async q=>{const em=str(q.body.email).toLowerCase(),name=str(q.body.name);
  if(!name)throw bad('Name is required.');if(!EMAIL.test(em))throw bad('Enter a valid email address.');if(!D.pwOk(q.body.pw))throw bad(PWMSG);
  if(D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em)||D.db.prepare("SELECT 1 FROM customers WHERE lower(json_extract(data,'$.email'))=?").get(em))throw bad('An account with this email already exists.');
  const salt=D.uid(),hash=D.hashPw(q.body.pw,salt),cid=D.uid();
- await issueOtp(em,'register',{name,salt,hash,cid});
- return{pending:true,message:'A verification code has been sent to your email.'}}));
+ const demoCode=await issueOtp(em,'register',{name,salt,hash,cid});
+ return{pending:true,message:DEMO_MODE?'Demo mode: use the verification code shown below.':'A verification code has been sent to your email.',demoCode}}));
 api.post('/verify-registration',wrap(async(q,s)=>{const em=str(q.body.email).toLowerCase(),r=consumeOtp(em,'register',q.body.tok),p=JSON.parse(r.payload);
  const u=D.tx(()=>{D.put('customers',{id:p.cid,name:p.name,email:em,phone:'',address:''});return D.makeUserFromHash(p.name,em,p.salt,p.hash,'customer',p.cid)});
  session(s,u);return{user:pub(u)}}));
-api.post('/forgot',wrap(async q=>{limit(q);const em=str(q.body.email).toLowerCase(),exists=!!D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em);
- if(exists)await issueOtp(em,'reset');return{ok:true,message:'If that email is registered, a verification code has been sent.'}}));
+api.post('/forgot',wrap(async q=>{limit(q);const em=str(q.body.email).toLowerCase(),exists=!!D.db.prepare('SELECT 1 FROM users WHERE email=?').get(em),demoCode=exists?await issueOtp(em,'reset'):undefined;
+ return{ok:true,message:DEMO_MODE?'Demo mode: use the verification code shown below.':'If that email is registered, a verification code has been sent.',demoCode}}));
 api.post('/reset',wrap(q=>{limit(q);const em=str(q.body.email).toLowerCase(),r=consumeOtp(em,'reset',q.body.tok);
  if(!D.pwOk(q.body.pw))throw bad(PWMSG);
  D.tx(()=>{const salt=D.uid();D.db.prepare('UPDATE users SET salt=?,hash=? WHERE email=?').run(salt,D.hashPw(q.body.pw,salt),em);D.db.prepare('DELETE FROM sessions WHERE uid=(SELECT id FROM users WHERE email=?)').run(em)});return{ok:true}}));

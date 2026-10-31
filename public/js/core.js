@@ -1,5 +1,6 @@
 let DB = {},
   ME = null,
+  DEMO_MODE = false,
   VIEW = "dashboard",
   Q = "",
   FL = {},
